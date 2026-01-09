@@ -1,43 +1,73 @@
 """
-VLA-RL DataHub: 支持 HDF5 和专用 Buffer 类型
+VLA-RL DataHub: 统一数据管理
+
+管理三种数据源:
+- Demo: 专家演示数据 (只读)
+- Rollout: 策略采集数据 (FIFO)
+- Intervention: 人工干预数据 (带持久化)
 """
-from __future__ import annotations
-from typing import Optional, Dict, Any, List, Literal, Union
-import os
+from typing import Optional, Dict, Any, List, Union
 import numpy as np
 
 from .base_buffer import BaseBuffer
 from .rollout_buffer import RolloutBuffer
-from .intervention_buffer import InterventionBuffer
 from .sample_strategy import BaseSampleStrategy, create_strategy
 from data import Transition, Episode, Batch, Observation, RobotState
 
-# 可选 HDF5 支持
-try:
-    from .hdf5_buffer import HDF5DemoBuffer
-    HAS_HDF5 = True
-except ImportError:
-    HDF5DemoBuffer = None
-    HAS_HDF5 = False
 
-
-SourceType = Literal["demo", "rollout", "intervention"]
+class SimpleBuffer(BaseBuffer):
+    """简单的内存 Buffer，用于测试"""
+    
+    def __init__(self, max_size: int = 100000):
+        super().__init__(max_size)
+        self._transitions: List[Transition] = []
+    
+    def add_transition(self, transition: Transition):
+        if len(self._transitions) >= self.max_size:
+            self._transitions.pop(0)
+        self._transitions.append(transition)
+    
+    def add_episode(self, episode: Episode):
+        for t in episode.transitions:
+            self.add_transition(t)
+    
+    def sample_transitions(self, batch_size: int) -> List[Transition]:
+        import random
+        if len(self._transitions) == 0:
+            return []
+        return random.choices(self._transitions, k=batch_size)
+    
+    def sample_episodes(self, batch_size: int) -> List[Episode]:
+        raise NotImplementedError()
+    
+    def __len__(self) -> int:
+        return len(self._transitions)
+    
+    @property
+    def num_episodes(self) -> int:
+        return 0
+    
+    def _get_save_data(self):
+        return self._transitions
+    
+    def _load_from_data(self, data):
+        self._transitions = data
+    
+    def clear(self):
+        self._transitions = []
 
 
 class DataHub:
     """
-    数据中心 V2
+    数据中心
     
-    针对真实机器人场景优化:
-    - Demo: HDF5 lazy loading，支持大规模图像数据
-    - Rollout: 内存环形缓冲，FIFO
-    - Intervention: 内存 + 异步落盘
+    统一管理 Demo/Rollout/Intervention 三种数据源
     """
     
     def __init__(self,
                  # Demo 配置
                  demo_paths: Optional[List[str]] = None,
-                 demo_format: str = "hdf5",  # "hdf5" | "pkl"
+                 demo_format: str = "hdf5",
                  camera_keys: Optional[List[str]] = None,
                  load_images: bool = True,
                  # Rollout 配置
@@ -48,7 +78,7 @@ class DataHub:
                  auto_save_intervention: bool = True):
         """
         Args:
-            demo_paths: Demo 文件路径，支持 glob 模式
+            demo_paths: Demo 文件路径
             demo_format: Demo 格式 "hdf5" 或 "pkl"
             camera_keys: 要加载的相机 keys
             load_images: 是否加载图像
@@ -58,30 +88,35 @@ class DataHub:
             auto_save_intervention: 是否自动保存 intervention
         """
         # Demo Buffer
-        if demo_format == "hdf5" and HAS_HDF5:
-            self.demo_buffer = HDF5DemoBuffer(
-                demo_paths=demo_paths,
-                camera_keys=camera_keys,
-                load_images=load_images,
-            )
-        else:
-            # 回退到简单 ReplayBuffer (pkl 格式)
-            from .simple_replay_buffer import SimpleReplayBuffer
-            self.demo_buffer = SimpleReplayBuffer()
-            if demo_paths:
-                for path in demo_paths:
-                    if os.path.exists(path):
-                        self.demo_buffer.load(path)
+        self.demo_buffer: BaseBuffer = self._create_demo_buffer(
+            demo_paths, demo_format, camera_keys, load_images
+        )
         
-        # Rollout Buffer (环形)
+        # Rollout Buffer
         self.rollout_buffer = RolloutBuffer(max_size=rollout_capacity)
         
-        # Intervention Buffer (带落盘)
-        self.intervention_buffer = InterventionBuffer(
-            max_size=intervention_capacity,
-            save_dir=intervention_save_dir,
-            auto_save=auto_save_intervention,
-        )
+        # Intervention Buffer (简化版)
+        self.intervention_buffer = SimpleBuffer(max_size=intervention_capacity)
+    
+    def _create_demo_buffer(self, demo_paths, demo_format, camera_keys, load_images) -> BaseBuffer:
+        """创建 Demo Buffer"""
+        if not demo_paths:
+            return SimpleBuffer(max_size=0)
+        
+        # 尝试使用 HDF5 Buffer
+        if demo_format == "hdf5":
+            try:
+                from .hdf5_buffer import HDF5DemoBuffer
+                return HDF5DemoBuffer(
+                    demo_paths=demo_paths,
+                    camera_keys=camera_keys,
+                    load_images=load_images,
+                )
+            except ImportError:
+                print("[Warning] HDF5 not available, using SimpleBuffer")
+        
+        # 回退到简单 Buffer
+        return SimpleBuffer()
     
     @property
     def buffers(self) -> Dict[str, BaseBuffer]:
@@ -92,18 +127,18 @@ class DataHub:
             "intervention": self.intervention_buffer,
         }
     
-    def write(self, data: Union[Episode, Transition], source: SourceType):
+    def write(self, data: Union[Episode, Transition], source: str):
         """
         写入数据
         
         Args:
             data: Episode 或 Transition
-            source: 数据来源
+            source: 数据来源 ("rollout" | "intervention")
         """
         if source == "demo":
-            raise ValueError("Demo buffer is read-only in V2")
+            raise ValueError("Demo buffer is read-only")
         
-        buffer = self._get_buffer(source)
+        buffer = self.buffers[source]
         
         if isinstance(data, Episode):
             for t in data.transitions:
@@ -135,10 +170,6 @@ class DataHub:
             raise ValueError("No data available in buffers")
         
         return self._transitions_to_batch(transitions)
-    
-    def _get_buffer(self, source: SourceType) -> BaseBuffer:
-        """根据 source 获取对应 buffer"""
-        return self.buffers[source]
     
     def _transitions_to_batch(self, transitions: List[Transition]) -> Batch:
         """将 transitions 转换为 Batch"""
@@ -195,12 +226,7 @@ class DataHub:
         return result
     
     def __len__(self) -> int:
-        """总 transition 数量"""
         return len(self.demo_buffer) + len(self.rollout_buffer) + len(self.intervention_buffer)
-    
-    def __bool__(self) -> bool:
-        """始终为真"""
-        return True
     
     def get_statistics(self) -> Dict[str, Any]:
         """获取统计信息"""
@@ -210,22 +236,3 @@ class DataHub:
             "intervention": self.intervention_buffer.get_statistics(),
             "total_transitions": len(self),
         }
-    
-    # ========== Intervention 特殊操作 ==========
-    
-    def start_intervention_episode(self, task_id: str = ""):
-        """开始收集 intervention episode"""
-        self.intervention_buffer.start_episode(task_id)
-    
-    def end_intervention_episode(self, success: bool = False):
-        """结束 intervention episode"""
-        self.intervention_buffer.end_episode(success)
-    
-    def load_intervention_history(self, load_dir: Optional[str] = None):
-        """加载历史 intervention 数据"""
-        self.intervention_buffer.load_from_disk(load_dir)
-    
-    def flush_intervention(self):
-        """强制落盘 intervention"""
-        self.intervention_buffer.flush()
-

@@ -1,5 +1,7 @@
 """
 VLA-RL 组合策略 (Residual, Ensemble)
+
+用于在预训练模型基础上进行微调
 """
 from typing import Dict, List
 import numpy as np
@@ -13,7 +15,8 @@ from data import Observation, RobotState, Action
 class ResidualPolicy(BasePolicy):
     """
     残差策略
-    action = base_policy(obs) + residual_policy(obs, base_action)
+    
+    action = base_policy(obs) + residual_scale * residual_policy(obs)
     
     用于在预训练 VLA 基础上学习残差修正
     """
@@ -26,7 +29,6 @@ class ResidualPolicy(BasePolicy):
             residual_policy: 残差策略 (训练)
             residual_scale: 残差缩放系数
         """
-        # 使用 base_policy 的维度
         super().__init__(
             state_dim=base_policy.state_dim,
             action_dim=base_policy.action_dim,
@@ -70,7 +72,8 @@ class ResidualPolicy(BasePolicy):
 class EnsemblePolicy(BasePolicy):
     """
     集成策略
-    对多个策略的输出取平均或加权平均
+    
+    对多个策略的输出取加权平均
     """
     
     def __init__(self, policies: List[BasePolicy], weights: List[float] = None):

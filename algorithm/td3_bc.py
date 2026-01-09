@@ -10,15 +10,12 @@ TD3+BC = TD3 (Twin Delayed DDPG) + Behavior Cloning 正则
 参考论文: A Minimalist Approach to Offline Reinforcement Learning
 """
 from typing import Dict
-import copy
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
 from .base_algorithm import BaseAlgorithm
 from model import ModelGroup
-from model.q_network import QNetwork
 from data import Batch
 from config import AlgorithmConfig
 
@@ -27,15 +24,26 @@ class TD3BC(BaseAlgorithm):
     """
     TD3 + Behavior Cloning
     
+    要求 ModelGroup 包含:
+    - policy: MLPPolicy
+    - q1, q2: QNetwork
+    - target_q1, target_q2: QNetwork (frozen)
+    
     Loss 组成:
     1. Q Loss: TD 误差 (让 Q 网络准确估计动作价值)
     2. Policy Loss: -Q(s, π(s)) + α * BC_loss (最大化 Q 值，同时不偏离专家动作)
     """
     
+    # 声明该算法需要的模型
+    REQUIRED_MODELS = ["policy", "q1", "q2", "target_q1", "target_q2"]
+    
     def __init__(self, model_group: ModelGroup, config: AlgorithmConfig = None):
         if config is None:
             config = AlgorithmConfig(name="td3_bc", lr=3e-4)
         super().__init__(model_group, config)
+        
+        # 验证 model_group
+        self._validate_model_group()
         
         # 获取模型
         self.policy = model_group.get("policy")
@@ -44,13 +52,13 @@ class TD3BC(BaseAlgorithm):
         self.target_q1 = model_group.get("target_q1")
         self.target_q2 = model_group.get("target_q2")
         
-        # 超参数
-        self.gamma = getattr(config, 'gamma', 0.99)
-        self.tau = getattr(config, 'tau', 0.005)
-        self.bc_alpha = getattr(config, 'bc_alpha', 2.5)  # BC 正则系数
-        self.policy_noise = getattr(config, 'policy_noise', 0.2)
-        self.noise_clip = getattr(config, 'noise_clip', 0.5)
-        self.policy_freq = getattr(config, 'policy_freq', 2)  # 延迟更新 policy
+        # 超参数 (支持从 algo_kwargs 获取)
+        self.gamma = config.get('gamma', 0.99)
+        self.tau = config.get('tau', 0.005)
+        self.bc_alpha = config.get('bc_alpha', 2.5)           # BC 正则系数
+        self.policy_noise = config.get('policy_noise', 0.2)   # 目标动作噪声
+        self.noise_clip = config.get('noise_clip', 0.5)       # 噪声裁剪
+        self.policy_freq = config.get('policy_freq', 2)       # 延迟更新 policy
         
         # 优化器
         self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=config.lr)
@@ -61,6 +69,16 @@ class TD3BC(BaseAlgorithm):
         
         # 设备
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    def _validate_model_group(self):
+        """验证 model_group 包含所需模型"""
+        missing = [name for name in self.REQUIRED_MODELS if name not in self.model_group]
+        if missing:
+            raise ValueError(
+                f"TD3BC requires models {self.REQUIRED_MODELS}, "
+                f"but missing: {missing}. "
+                f"Available: {self.model_group.model_names}"
+            )
     
     def train_step(self, batch: Batch) -> Dict[str, float]:
         """训练一步"""

@@ -2,7 +2,7 @@
 VLA-RL Buffer 基类
 """
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List
 import pickle
 
 from data import Transition, Episode
@@ -11,6 +11,12 @@ from data import Transition, Episode
 class BaseBuffer(ABC):
     """
     Buffer 基类
+    
+    所有 Buffer 实现需要继承此类并实现:
+    - add_transition(): 添加单步数据
+    - add_episode(): 添加完整轨迹
+    - sample_transitions(): 采样 transitions
+    - sample_episodes(): 采样 episodes
     """
     
     def __init__(self, max_size: int = 100000):
@@ -71,3 +77,10 @@ class BaseBuffer(ABC):
     def clear(self):
         """清空 buffer"""
         pass
+    
+    def get_statistics(self) -> dict:
+        """获取统计信息"""
+        return {
+            "num_transitions": len(self),
+            "num_episodes": self.num_episodes,
+        }

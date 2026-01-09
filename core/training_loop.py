@@ -1,5 +1,7 @@
 """
 VLA-RL 训练循环
+
+当前支持 Offline 训练，Online 训练需要使用 train_online.py
 """
 from typing import List, Optional, Callable, Dict, Any
 import time
@@ -10,20 +12,24 @@ from algorithm import BaseAlgorithm, create_algorithm
 from model import ModelGroup
 from buffer import DataHub
 from data import Batch
-from config import TrainingConfig, StageConfig
+from config import TrainingConfig, AlgorithmConfig
 
 
 class TrainingLoop:
     """
     训练循环
-    支持单阶段/多阶段训练
+    
+    支持:
+    - 多阶段训练
+    - 不同阶段使用不同算法
+    - 模型冻结/解冻控制
     """
     
     def __init__(self,
                  model_group: ModelGroup,
                  data_hub: DataHub,
                  config: TrainingConfig,
-                 algo_config: 'AlgorithmConfig' = None,
+                 algo_config: AlgorithmConfig = None,
                  weight_sync: Optional[BaseWeightSync] = None,
                  device: str = "cuda"):
         """
@@ -31,8 +37,8 @@ class TrainingLoop:
             model_group: 模型组
             data_hub: 数据中心
             config: 训练配置
-            algo_config: 算法配置（学习率、batch_size等）
-            weight_sync: 权重同步器 (可选，用于 Online 模式)
+            algo_config: 算法配置
+            weight_sync: 权重同步器 (可选)
             device: 训练设备
         """
         self.model_group = model_group
@@ -51,7 +57,7 @@ class TrainingLoop:
         # 当前阶段索引
         self.current_stage_idx = 0
         
-        # 算法实例缓存 (每个阶段可能用不同算法)
+        # 算法实例缓存
         self._algorithms: Dict[str, BaseAlgorithm] = {}
         
         # 运行状态

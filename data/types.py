@@ -1,5 +1,13 @@
 """
 VLA-RL 数据类型定义
+
+核心类型:
+- Observation: 感知输入 (图像、语言)
+- RobotState: 机器人本体状态
+- Action: 动作
+- Transition: 单步数据 (s, a, r, s', done)
+- Episode: 完整轨迹
+- Batch: 训练批次
 """
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Iterator

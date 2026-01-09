@@ -1,7 +1,12 @@
 """
 VLA-RL 推理循环
+
+支持:
+- 权重热更新
+- Action Chunking
+- 历史上下文
 """
-from typing import Optional, List, Deque
+from typing import Optional, Deque
 from collections import deque
 import copy
 import numpy as np
@@ -58,10 +63,8 @@ class HistoryBuffer:
 class InferenceLoop:
     """
     推理循环
-    支持:
-    - 权重热更新
-    - Action Chunking
-    - 历史上下文
+    
+    用于在环境中执行策略，收集数据
     """
     
     def __init__(self,
@@ -230,6 +233,57 @@ class InferenceLoop:
     def stop(self):
         """停止推理"""
         self._running = False
+    
+    def collect_rollout(self, num_steps: int, source: str = "rollout") -> int:
+        """
+        收集指定步数的数据
+        
+        Args:
+            num_steps: 要收集的步数
+            source: 数据来源标记
+            
+        Returns:
+            实际收集的步数
+        """
+        collected = 0
+        env_output = self.env.reset()
+        
+        while collected < num_steps:
+            # 检查权重更新
+            self._check_weight_update()
+            
+            # 获取动作
+            action = self._get_action(env_output.obs, env_output.robot_state)
+            
+            # 保存当前状态
+            prev_obs = env_output.obs
+            prev_robot_state = env_output.robot_state
+            
+            # 执行动作
+            env_output = self.env.step(action)
+            collected += 1
+            
+            # 创建 transition
+            transition = Transition(
+                obs=prev_obs,
+                robot_state=prev_robot_state,
+                action=action,
+                reward=env_output.reward,
+                next_obs=env_output.obs,
+                next_robot_state=env_output.robot_state,
+                done=env_output.done,
+                source=source,
+            )
+            
+            # 写入数据
+            if self.data_hub:
+                self.data_hub.write(transition, source=source)
+            
+            # 如果 episode 结束，重置环境
+            if env_output.done:
+                env_output = self.env.reset()
+        
+        return collected
     
     def evaluate(self, num_episodes: int = 10) -> dict:
         """

@@ -3,7 +3,6 @@ VLA-RL 环境基类
 """
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
-import numpy as np
 
 from data import Observation, RobotState, Action, EnvOutput
 from config import EnvConfig

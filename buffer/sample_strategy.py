@@ -1,12 +1,13 @@
 """
 VLA-RL 采样策略
+
+支持从多个 buffer 按不同策略采样
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import List, Dict
 import random
-import numpy as np
 
-from data import Transition, Batch
+from data import Transition
 
 
 class BaseSampleStrategy(ABC):

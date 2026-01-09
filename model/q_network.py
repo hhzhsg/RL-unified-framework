@@ -1,6 +1,11 @@
 """
-VLA-RL Q Network
-用于 TD3+BC, CQL, IQL 等 Offline RL 算法
+VLA-RL Q Network / V Network
+
+用于 TD3+BC, CQL, IQL, SAC 等需要价值估计的算法
+
+统一定义，避免重复:
+- QNetwork: Q(s, a) 网络
+- VNetwork: V(s) 网络
 """
 from typing import List
 import numpy as np
@@ -11,7 +16,8 @@ import torch.nn as nn
 class QNetwork(nn.Module):
     """
     Q(s, a) 网络
-    输入: state + action
+    
+    输入: state + action (拼接)
     输出: Q 值 (标量)
     """
     
@@ -52,7 +58,8 @@ class QNetwork(nn.Module):
 
 class VNetwork(nn.Module):
     """
-    V(s) 网络 (用于 IQL)
+    V(s) 网络 (用于 IQL, AWR)
+    
     输入: state
     输出: V 值 (标量)
     """

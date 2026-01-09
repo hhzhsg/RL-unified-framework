@@ -1,5 +1,7 @@
 """
 VLA-RL 权重同步
+
+用于训练进程和推理进程之间的模型权重同步
 """
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any

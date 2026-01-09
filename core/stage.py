@@ -1,8 +1,10 @@
 """
 VLA-RL 训练阶段
+
+支持多阶段训练 (如 RECAP: 先训练 VF，再训练 Policy)
 """
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 from config import StageConfig
 
@@ -11,7 +13,11 @@ from config import StageConfig
 class Stage:
     """
     训练阶段
-    支持多阶段训练 (如 RECAP: 先训练 VF，再训练 Policy)
+    
+    每个阶段可以:
+    - 使用不同的算法
+    - 激活不同的模型
+    - 使用不同的采样策略
     """
     name: str
     algorithm_name: str

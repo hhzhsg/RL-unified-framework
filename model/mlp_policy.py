@@ -1,7 +1,11 @@
 """
 VLA-RL MLP Policy 实现
+
+两种策略:
+- MLPPolicy: 确定性策略，输出动作
+- MLPGaussianPolicy: 随机策略，输出动作分布 (用于 SAC)
 """
-from typing import Dict, List, Optional
+from typing import Dict, List
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,9 +16,10 @@ from data import Observation, RobotState, Action
 
 class MLPPolicy(BasePolicy):
     """
-    MLP 策略
+    MLP 确定性策略
+    
     输入: robot_state
-    输出: action
+    输出: action (确定性)
     """
     
     def __init__(self, state_dim: int, action_dim: int, 
@@ -80,7 +85,9 @@ class MLPPolicy(BasePolicy):
 class MLPGaussianPolicy(BasePolicy):
     """
     高斯策略 (用于 SAC)
-    输出动作的均值和标准差
+    
+    输入: robot_state
+    输出: 动作的均值和标准差，支持采样
     """
     
     def __init__(self, state_dim: int, action_dim: int,
@@ -132,11 +139,17 @@ class MLPGaussianPolicy(BasePolicy):
         return mean, log_std
     
     def sample(self, obs: Dict[str, torch.Tensor], robot_state: torch.Tensor):
-        """采样动作 (带重参数化)"""
+        """
+        采样动作 (带重参数化)
+        
+        Returns:
+            action: 采样的动作 (B, action_dim)
+            log_prob: 对数概率 (B, 1)
+        """
         mean, log_std = self.forward(obs, robot_state)
         std = log_std.exp()
         
-        # 重参数化
+        # 重参数化采样
         dist = torch.distributions.Normal(mean, std)
         action_raw = dist.rsample()
         

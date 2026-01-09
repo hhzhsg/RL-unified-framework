@@ -1,3 +1,12 @@
+"""
+VLA-RL 核心模块
+
+提供:
+- TrainingLoop: 训练循环
+- InferenceLoop: 推理循环
+- WeightSync: 权重同步
+- Stage: 训练阶段
+"""
 from .stage import Stage
 from .weight_sync import (
     BaseWeightSync,

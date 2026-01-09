@@ -1,8 +1,10 @@
 """
 VLA-RL Algorithm 基类
+
+所有算法继承此类，实现 train_step() 方法
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from model import ModelGroup
 from data import Batch
@@ -15,7 +17,14 @@ class BaseAlgorithm(ABC):
     
     所有算法实现需要继承此类并实现:
     - train_step(): 单步训练
+    
+    可选:
+    - REQUIRED_MODELS: 声明需要的模型列表
+    - _validate_model_group(): 验证 model_group
     """
+    
+    # 子类可覆盖，声明需要的模型
+    REQUIRED_MODELS: List[str] = []
     
     def __init__(self, model_group: ModelGroup, config: AlgorithmConfig):
         self.model_group = model_group
@@ -34,6 +43,19 @@ class BaseAlgorithm(ABC):
             包含各项 loss 和 metrics 的字典
         """
         pass
+    
+    def _validate_model_group(self):
+        """验证 model_group 包含所需模型 (子类可覆盖)"""
+        if not self.REQUIRED_MODELS:
+            return
+        
+        missing = [name for name in self.REQUIRED_MODELS if name not in self.model_group]
+        if missing:
+            raise ValueError(
+                f"{self.name} requires models {self.REQUIRED_MODELS}, "
+                f"but missing: {missing}. "
+                f"Available: {self.model_group.model_names}"
+            )
     
     @property
     def name(self) -> str:

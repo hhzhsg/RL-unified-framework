@@ -2,8 +2,7 @@
 VLA-RL Policy 基类
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, Union
-import numpy as np
+from typing import Dict, Any
 import torch
 import torch.nn as nn
 
@@ -15,8 +14,8 @@ class BasePolicy(ABC, nn.Module):
     策略基类
     
     所有策略实现需要继承此类并实现:
-    - forward(): 网络前向传播
-    - act(): 推理输出动作
+    - forward(): 网络前向传播 (用于训练)
+    - act(): 推理输出动作 (用于推理)
     """
     
     def __init__(self, state_dim: int, action_dim: int, action_space: str = "joint"):
@@ -31,7 +30,7 @@ class BasePolicy(ABC, nn.Module):
         网络前向传播
         
         Args:
-            obs: 观测字典 (batched)
+            obs: 观测字典 (batched)，MLP 策略可忽略
             robot_state: 机器人状态 (B, state_dim)
             
         Returns:

@@ -1,5 +1,10 @@
 """
 VLA-RL ModelGroup: 多模型管理
+
+统一管理训练中的多个模型:
+- 注册/获取模型
+- 冻结/解冻控制
+- 批量保存/加载
 """
 from typing import Dict, Iterator, Optional, List, Any
 import torch
@@ -9,8 +14,15 @@ import torch.nn as nn
 class ModelGroup:
     """
     模型组管理器
-    管理多个相关模型 (如 policy + value function + critic)
+    
+    管理多个相关模型 (如 policy + q1 + q2 + target_q1 + target_q2)
     支持冻结/解冻、统一保存加载
+    
+    命名规范:
+    - policy: 策略网络
+    - q1, q2: Q 网络
+    - target_q1, target_q2: 目标 Q 网络
+    - vf: 价值函数
     """
     
     def __init__(self):

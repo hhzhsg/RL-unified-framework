@@ -1,3 +1,6 @@
+"""
+VLA-RL 环境模块
+"""
 from .base_env import BaseEnv
 from .dummy_env import DummyEnv
 
@@ -8,9 +11,7 @@ ENV_REGISTRY = {
 
 
 def create_env(config) -> BaseEnv:
-    """
-    根据配置创建环境
-    """
+    """根据配置创建环境"""
     from config import Config, EnvConfig
     
     if isinstance(config, Config):
@@ -30,6 +31,7 @@ def create_env(config) -> BaseEnv:
 def register_env(name: str, env_cls):
     """注册新环境"""
     ENV_REGISTRY[name] = env_cls
+    return env_cls
 
 
 __all__ = [
