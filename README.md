@@ -1,6 +1,38 @@
 # VLA-RL Framework
 
-模块化机器人学习框架，支持 **Offline / Online / Human-in-the-Loop** 三种训练模式。
+**模块化强化学习框架** — 专为机器人学习设计，支持 **Offline / Online / Human-in-the-Loop** 三种训练模式。
+
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+## ✨ 核心特性
+
+- 🧩 **积木式架构**：注册表模式支持插件化扩展，无需修改框架代码
+- 🎯 **单一职责**：每个模块专注一件事，易于维护和测试
+- 📝 **配置驱动**：YAML 配置文件组合不同模块，10 分钟启动新实验
+- 🔄 **多阶段训练**：原生支持 RECAP/AWR 等多阶段算法
+- 🤖 **机器人友好**：统一管理 Demo/Rollout/Intervention 三种数据源
+- ⚡ **训练/推理分离**：异步架构，互不阻塞
+
+---
+
+## 📦 版本历史
+
+### v0.2.0 (2026-01-09) - 当前版本
+- ✅ 完整的多阶段训练支持
+- ✅ TD3+BC / SAC 离线算法实现
+- ✅ ModelGroup 冻结/解冻控制
+- ✅ 配置驱动的训练流程
+- ✅ 完善的类型提示和文档
+
+### v0.1.0 (2025-12) - 初始版本
+- ✅ 基础框架搭建
+- ✅ BC 算法实现
+- ✅ DataHub 数据管理
+- ✅ HDF5 数据加载
 
 ```
                     ┌─────────────┐
@@ -75,10 +107,105 @@ vla_rl/
 └── checkpoints/            # 💾 模型存储
 ```
 
-## 安装
+---
+
+## 🚀 快速开始
+
+### 安装
+
+#### 1. 克隆仓库
+```bash
+git clone https://github.com/hhzhsg/RL-unified-framework.git
+cd RL-unified-framework
+```
+
+#### 2. 创建 Python 环境（推荐）
+```bash
+# 使用 conda
+conda create -n vla_rl python=3.10
+conda activate vla_rl
+
+# 或使用 venv
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# venv\Scripts\activate  # Windows
+```
+
+#### 3. 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+**依赖包说明**：
+- `torch>=2.0.0` - 深度学习框架
+- `numpy>=1.24.0` - 数值计算
+- `h5py>=3.8.0` - HDF5 数据格式支持
+- `pyyaml>=6.0` - YAML 配置文件解析
+
+#### 4. 验证安装
+```bash
+python -c "import torch; import numpy; import h5py; import yaml; print('✅ 所有依赖安装成功')"
+```
+
+---
+
+### 使用示例
+
+#### 方式 1：使用配置文件训练（推荐）
 
 ```bash
-pip install torch numpy h5py pyyaml
+# 离线 BC 训练
+python scripts/train.py --config config/train_config.yaml --name offline_bc
+
+# 离线 TD3+BC 训练
+python scripts/train.py --config config/train_config.yaml --name offline_td3bc
+```
+
+#### 方式 2：编程式训练
+
+```python
+from config import make_bc_config, load_config_from_yaml
+from model import ModelGroup, MLPPolicy
+from buffer import DataHub
+from core import TrainingLoop
+from scripts.train import create_model_group
+
+# 1. 加载配置
+config = load_config_from_yaml("config/train_config.yaml", "offline_bc")
+
+# 2. 创建数据中心
+data_hub = DataHub(
+    demo_paths=config.data.demo_paths,
+    load_images=False
+)
+
+# 3. 创建模型组
+model_group = create_model_group(config)
+
+# 4. 启动训练
+trainer = TrainingLoop(
+    model_group=model_group,
+    data_hub=data_hub,
+    config=config.training,
+    algo_config=config.algorithm,
+    device=config.device
+)
+trainer.run()
+```
+
+#### 方式 3：10 行代码开始实验
+
+```python
+from config import make_bc_config
+from scripts.train import setup_logging, create_model_group, create_data_hub
+from core import TrainingLoop
+
+config = make_bc_config()  # 使用预设配置
+logger = setup_logging(config.exp_name)
+data_hub = create_data_hub(config)
+model_group = create_model_group(config)
+trainer = TrainingLoop(model_group, data_hub, config.training, config.algorithm, config.device)
+trainer.run()
 ```
 
 ---
@@ -570,6 +697,62 @@ STRATEGY_REGISTRY["prioritized"] = PrioritizedStrategy
 
 ---
 
-## License
+## 📚 文档
 
-MIT
+> 💡 **不知道看哪个文档？** 参考 [文档导航指南](DOCS_GUIDE.md)
+
+- **[QUICKREF.md](QUICKREF.md)** - 5 分钟速查表 ⚡
+  - 常用配置模板
+  - API 速查
+  - 问题排查
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 框架设计哲学与架构详解 📖
+  - 为什么这个设计是优雅的？
+  - 设计模式详解
+  - 模块化设计分析
+  - 扩展性分析
+
+- **[CHANGELOG.md](CHANGELOG.md)** - 版本更新历史 📝
+  - 版本特性
+  - 升级指南
+
+- **[.github/copilot-instructions.md](.github/copilot-instructions.md)** - AI 编码助手指南 🤖
+  - 快速上手指南
+  - 注册表模式使用
+  - 添加新算法示例
+
+---
+
+## 🤝 贡献
+
+欢迎贡献！请遵循以下步骤：
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 开启 Pull Request
+
+---
+
+## 📄 License
+
+本项目基于 MIT 协议开源 - 查看 [LICENSE](LICENSE) 文件了解详情。
+
+---
+
+## 🙏 致谢
+
+- 框架设计参考了 Stable-Baselines3, CleanRL, RLlib 等优秀项目
+- 感谢所有贡献者的支持
+
+---
+
+## 📧 联系方式
+
+- **GitHub Issues**: [提交问题](https://github.com/hhzhsg/RL-unified-framework/issues)
+- **作者**: hhzhsg
+
+---
+
+**⭐ 如果这个项目对您有帮助，请给个 Star！**

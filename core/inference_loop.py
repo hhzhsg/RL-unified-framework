@@ -177,7 +177,7 @@ class InferenceLoop:
             episode.add(transition)
             
             # 写入数据
-            if collect_data and self.data_hub:
+            if collect_data and self.data_hub is not None:
                 self.data_hub.write(transition, source=source)
             
             # 更新历史
@@ -276,7 +276,7 @@ class InferenceLoop:
             )
             
             # 写入数据
-            if self.data_hub:
+            if self.data_hub is not None:
                 self.data_hub.write(transition, source=source)
             
             # 如果 episode 结束，重置环境
