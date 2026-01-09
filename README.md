@@ -712,6 +712,12 @@ STRATEGY_REGISTRY["prioritized"] = PrioritizedStrategy
   - 模块化设计分析
   - 扩展性分析
 
+- **[docs/TWO_STAGE_TRAINING.md](docs/TWO_STAGE_TRAINING.md)** - 两阶段训练指南 🎯
+  - Offline → Online 训练流程
+  - 数据流架构详解
+  - 使用示例和常见问题
+  - 相关工作对比
+
 - **[CHANGELOG.md](CHANGELOG.md)** - 版本更新历史 📝
   - 版本特性
   - 升级指南

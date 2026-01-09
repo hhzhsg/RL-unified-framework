@@ -80,6 +80,19 @@ class TD3BC(BaseAlgorithm):
                 f"Available: {self.model_group.model_names}"
             )
     
+    def _get_action(self, policy, state: torch.Tensor) -> torch.Tensor:
+        """
+        从 policy 获取动作，兼容 MLPPolicy 和 MLPGaussianPolicy
+        """
+        output = policy.forward({}, state)
+        if isinstance(output, tuple):
+            # MLPGaussianPolicy 返回 (mean, log_std)
+            mean, _ = output
+            return torch.tanh(mean)  # 转换到 [-1, 1]
+        else:
+            # MLPPolicy 直接返回 action
+            return output
+    
     def train_step(self, batch: Batch) -> Dict[str, float]:
         """训练一步"""
         self.model_group.train(["policy", "q1", "q2"])
@@ -98,7 +111,7 @@ class TD3BC(BaseAlgorithm):
             noise = (torch.randn_like(action) * self.policy_noise).clamp(
                 -self.noise_clip, self.noise_clip
             )
-            next_action = self.policy.forward({}, next_state)
+            next_action = self._get_action(self.policy, next_state)
             next_action = (next_action + noise).clamp(-1, 1)
             
             # 目标 Q 值 (取两个 Q 网络的较小值，减少过估计)
@@ -130,7 +143,7 @@ class TD3BC(BaseAlgorithm):
         
         if self._train_step_count % self.policy_freq == 0:
             # 预测动作
-            pred_action = self.policy.forward({}, state)
+            pred_action = self._get_action(self.policy, state)
             
             # Q 值 (用 Q1)
             q_value = self.q1(state, pred_action)

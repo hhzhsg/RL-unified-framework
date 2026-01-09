@@ -49,13 +49,18 @@ class RolloutOnlyStrategy(BaseSampleStrategy):
 
 
 class MixedStrategy(BaseSampleStrategy):
-    """混合采样"""
+    """
+    混合采样策略
     
-    def __init__(self, demo_ratio: float = 0.5, intervention_ratio: float = 0.0):
+    支持 Demo + Rollout + Intervention 按比例混合采样
+    关键特性：当 Rollout 为空时，自动退化为纯 Demo 采样
+    """
+    
+    def __init__(self, demo_ratio: float = 0.25, intervention_ratio: float = 0.0):
         """
         Args:
-            demo_ratio: demo 数据占比
-            intervention_ratio: intervention 数据占比
+            demo_ratio: demo 数据目标占比 (默认 25%)
+            intervention_ratio: intervention 数据目标占比
             rollout 占比 = 1 - demo_ratio - intervention_ratio
         """
         self.demo_ratio = demo_ratio
@@ -69,33 +74,50 @@ class MixedStrategy(BaseSampleStrategy):
         rollout_buffer = buffers.get("rollout")
         intervention_buffer = buffers.get("intervention")
         
-        # 计算各部分采样数量
-        demo_size = int(batch_size * self.demo_ratio)
-        intervention_size = int(batch_size * self.intervention_ratio)
-        rollout_size = batch_size - demo_size - intervention_size
+        # 检查各 buffer 可用性
+        demo_available = demo_buffer is not None and len(demo_buffer) > 0
+        rollout_available = rollout_buffer is not None and len(rollout_buffer) > 0
+        intervention_available = intervention_buffer is not None and len(intervention_buffer) > 0
         
+        # ========== 关键逻辑：Rollout 为空时退化为纯 Demo ==========
+        if not rollout_available and not intervention_available:
+            # 只有 Demo 可用 → 纯 Demo 采样
+            if demo_available:
+                return demo_buffer.sample_transitions(batch_size)
+            else:
+                return []
+        
+        if not rollout_available:
+            # Rollout 为空，Demo 和 Intervention 按比例分配
+            if demo_available and intervention_available:
+                total_ratio = self.demo_ratio + self.intervention_ratio
+                demo_size = int(batch_size * self.demo_ratio / total_ratio)
+                intervention_size = batch_size - demo_size
+                transitions = demo_buffer.sample_transitions(demo_size)
+                transitions.extend(intervention_buffer.sample_transitions(intervention_size))
+                return transitions
+            elif demo_available:
+                return demo_buffer.sample_transitions(batch_size)
+            elif intervention_available:
+                return intervention_buffer.sample_transitions(batch_size)
+            else:
+                return []
+        
+        # ========== 正常情况：按目标比例采样 ==========
         transitions = []
         
-        # 采样 demo
-        if demo_buffer and len(demo_buffer) > 0 and demo_size > 0:
+        # 计算目标采样数量
+        demo_size = int(batch_size * self.demo_ratio) if demo_available else 0
+        intervention_size = int(batch_size * self.intervention_ratio) if intervention_available else 0
+        rollout_size = batch_size - demo_size - intervention_size
+        
+        # 采样
+        if demo_size > 0:
             transitions.extend(demo_buffer.sample_transitions(demo_size))
-        
-        # 采样 intervention
-        if intervention_buffer and len(intervention_buffer) > 0 and intervention_size > 0:
+        if intervention_size > 0:
             transitions.extend(intervention_buffer.sample_transitions(intervention_size))
-        
-        # 采样 rollout
-        if rollout_buffer and len(rollout_buffer) > 0 and rollout_size > 0:
+        if rollout_size > 0:
             transitions.extend(rollout_buffer.sample_transitions(rollout_size))
-        
-        # 如果某个 buffer 为空，从其他 buffer 补充
-        if len(transitions) < batch_size:
-            all_buffers = [b for b in [demo_buffer, rollout_buffer, intervention_buffer] 
-                         if b is not None and len(b) > 0]
-            if all_buffers:
-                need = batch_size - len(transitions)
-                extra_buffer = random.choice(all_buffers)
-                transitions.extend(extra_buffer.sample_transitions(need))
         
         return transitions
 

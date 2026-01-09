@@ -19,11 +19,11 @@ class SimpleBuffer(BaseBuffer):
     """简单的内存 Buffer，用于测试"""
     
     def __init__(self, max_size: int = 100000):
-        super().__init__(max_size)
+        super().__init__(max_size if max_size > 0 else 100000)
         self._transitions: List[Transition] = []
     
     def add_transition(self, transition: Transition):
-        if len(self._transitions) >= self.max_size:
+        if self.max_size > 0 and len(self._transitions) >= self.max_size:
             self._transitions.pop(0)
         self._transitions.append(transition)
     
