@@ -1,764 +1,873 @@
-# VLA-RL Framework
-
-**模块化强化学习框架** — 专为机器人学习设计，支持 **Offline / Online / Human-in-the-Loop** 三种训练模式。
-
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
----
-
-## ✨ 核心特性
-
-- 🧩 **积木式架构**：注册表模式支持插件化扩展，无需修改框架代码
-- 🎯 **单一职责**：每个模块专注一件事，易于维护和测试
-- 📝 **配置驱动**：YAML 配置文件组合不同模块，10 分钟启动新实验
-- 🔄 **多阶段训练**：原生支持 RECAP/AWR 等多阶段算法
-- 🤖 **机器人友好**：统一管理 Demo/Rollout/Intervention 三种数据源
-- ⚡ **训练/推理分离**：异步架构，互不阻塞
-
----
-
-## 📦 版本历史
-
-### v0.2.0 (2026-01-09) - 当前版本
-- ✅ 完整的多阶段训练支持
-- ✅ TD3+BC / SAC 离线算法实现
-- ✅ ModelGroup 冻结/解冻控制
-- ✅ 配置驱动的训练流程
-- ✅ 完善的类型提示和文档
-
-### v0.1.0 (2025-12) - 初始版本
-- ✅ 基础框架搭建
-- ✅ BC 算法实现
-- ✅ DataHub 数据管理
-- ✅ HDF5 数据加载
-
-```
-                    ┌─────────────┐
-                    │ Intervention│───┐
-                    └─────────────┘   │
-                    ┌─────────────┐   │     ┌─────────┐      ┌──────────────┐
-                    │    Demo     │───┼────▶│ Sampler │─────▶│Training Loop │
-                    └─────────────┘   │     └─────────┘      │  ┌─────────┐ │
-                    ┌─────────────┐   │                      │  │Algorithm│ │
-                    │   Rollout   │───┘                      │  └─────────┘ │
-                    └─────────────┘                          └──────┬───────┘
-                          ▲                                         │
-                          │ write                                   │ sync
-                          │                                         ▼
-┌─────────┐  obs/state   ┌──────────────┐                   ┌──────────────┐
-│   Env   │◀────────────▶│Inference Loop│◀─────────────────▶│ ModelGroup   │
-└─────────┘    action    └──────────────┘                   │ ┌──────┬───┐ │
-                                                            │ │policy│ VF│ │
-                                                            │ └──────┴───┘ │
-                                                            └──────────────┘
-```
 
 ## 目录结构
 
 ```
-vla_rl/
-├── config/                 # 🔧 配置系统
-│   ├── config.py           #    Config/StageConfig 等 dataclass 定义
-│   ├── train_config.yaml   #    YAML 训练配置文件
-│   └── __init__.py
+RL-unified-framework/
+├── algorithm/                  # 算法模块
+│   ├── base_algorithm.py      # BaseAlgorithm 基类
+│   ├── bc.py                  # Behavior Cloning
+│   ├── sac.py                 # Soft Actor-Critic
+│   └── td3_bc.py              # TD3+BC 离线算法
 │
-├── data/                   # 📦 数据类型定义
-│   ├── types.py            #    Observation, RobotState, Action, Transition, Episode, Batch
-│   └── __init__.py
+├── buffer/                     # 数据缓冲模块
+│   ├── base_buffer.py         # BaseBuffer 基类
+│   ├── data_hub.py            # DataHub 统一数据管理
+│   ├── hdf5_buffer.py         # Demo 数据只读缓冲
+│   ├── rollout_buffer.py      # Rollout FIFO 缓冲
+│   └── sample_strategy.py     # 采样策略 (DemoOnly/Mixed)
 │
-├── buffer/                 # 💾 数据管理 (对应架构图左上)
-│   ├── data_hub.py         #    DataHub: 统一数据接口
-│   ├── hdf5_buffer.py      #    HDF5DemoBuffer: Demo 数据加载
-│   ├── rollout_buffer.py   #    RolloutBuffer: 在线数据存储
-│   ├── intervention_buffer.py  # InterventionBuffer: 人工干预数据
-│   ├── sample_strategy.py  #    Sampler: 采样策略 (demo_only/mixed/...)
-│   └── __init__.py
+├── core/                       # 核心训练循环
+│   ├── training_loop.py       # 训练循环
+│   ├── inference_loop.py      # 推理循环
+│   ├── stage.py               # 多阶段训练管理
+│   └── weight_sync.py         # 权重同步
 │
-├── model/                  # 🧠 模型定义 (对应架构图右下 ModelGroup)
-│   ├── model_group.py      #    ModelGroup: 模型注册/冻结管理
-│   ├── base_policy.py      #    BasePolicy: 策略基类
-│   ├── mlp_policy.py       #    MLPPolicy/MLPGaussianPolicy
-│   ├── composite_policy.py #    ResidualPolicy/EnsemblePolicy
-│   └── __init__.py
+├── data/                       # 数据类型定义
+│   └── types.py               # Transition/Batch/Action/EnvOutput
 │
-├── algorithm/              # ⚙️ 训练算法 (对应架构图 Algorithm)
-│   ├── base_algorithm.py   #    BaseAlgorithm: 算法基类
-│   ├── bc.py               #    BC: Behavior Cloning
-│   ├── sac.py              #    SAC: Soft Actor-Critic
-│   └── __init__.py         #    ALGORITHM_REGISTRY
+├── env/                        # 环境模块
+│   ├── base_env.py            # BaseEnv 基类
+│   └── dummy_env.py           # DummyEnv 测试环境
 │
-├── core/                   # 🔄 核心循环 (对应架构图 Training/Inference Loop)
-│   ├── training_loop.py    #    TrainingLoop: 训练主循环
-│   ├── inference_loop.py   #    InferenceLoop: 推理主循环
-│   ├── weight_sync.py      #    WeightSync: 权重同步 (sync 箭头)
-│   ├── stage.py            #    Stage: 多阶段训练控制
-│   └── __init__.py
+├── model/                      # 模型模块
+│   ├── base_policy.py         # BasePolicy 基类
+│   ├── mlp_policy.py          # MLP 策略网络
+│   ├── q_network.py           # Q/V 网络
+│   └── model_group.py         # 模型管理器
 │
-├── env/                    # 🌍 环境接口 (对应架构图 Env)
-│   ├── base_env.py         #    BaseEnv: 环境基类
-│   ├── dummy_env.py        #    DummyEnv: 测试用虚拟环境
-│   └── __init__.py         #    ENV_REGISTRY
+├── reward/                     # 奖励模块
+│   ├── base_reward.py         # BaseReward 基类
+│   ├── env_reward.py          # 环境奖励
+│   ├── shaped_reward.py       # 奖励塑形
+│   └── composite_reward.py    # 奖励组合
 │
-├── scripts/                # 🚀 运行脚本
-│   └── train.py            #    统一训练入口
+├── logger/                     # 日志模块
+│   ├── base_logger.py         # BaseLogger 基类
+│   ├── console_logger.py      # 控制台日志
+│   └── tensorboard_logger.py  # TensorBoard 集成
 │
-└── checkpoints/            # 💾 模型存储
+├── config/                     # 配置模块
+│   ├── config.py              # 配置类定义
+│   └── train_config.yaml      # 训练配置文件
+│
+└── scripts/                    # 训练脚本
+    ├── train.py               # 离线训练
+    ├── train_online.py        # 在线训练
+    └── train_two_stage_example.py  # 双阶段训练示例
 ```
 
 ---
 
-## 🚀 快速开始
+## 安装
 
-### 安装
-
-#### 1. 克隆仓库
 ```bash
+# 1. 克隆仓库
 git clone https://github.com/hhzhsg/RL-unified-framework.git
 cd RL-unified-framework
-```
 
-#### 2. 创建 Python 环境（推荐）
-```bash
-# 使用 conda
+# 2. 创建环境
 conda create -n vla_rl python=3.10
 conda activate vla_rl
 
-# 或使用 venv
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate  # Windows
-```
-
-#### 3. 安装依赖
-```bash
+# 3. 安装依赖
 pip install -r requirements.txt
 ```
 
-**依赖包说明**：
-- `torch>=2.0.0` - 深度学习框架
-- `numpy>=1.24.0` - 数值计算
-- `h5py>=3.8.0` - HDF5 数据格式支持
-- `pyyaml>=6.0` - YAML 配置文件解析
-
-#### 4. 验证安装
-```bash
-python -c "import torch; import numpy; import h5py; import yaml; print('✅ 所有依赖安装成功')"
-```
+**依赖**: `torch>=2.0.0`, `numpy>=1.24.0`, `h5py>=3.8.0`, `pyyaml>=6.0`
 
 ---
 
-### 使用示例
+## 使用方式
 
-#### 方式 1：使用配置文件训练（推荐）
+### 1. 离线训练（BC / TD3+BC）
 
 ```bash
-# 离线 BC 训练
+# 行为克隆
 python scripts/train.py --config config/train_config.yaml --name offline_bc
 
-# 离线 TD3+BC 训练
+# TD3+BC
 python scripts/train.py --config config/train_config.yaml --name offline_td3bc
 ```
 
-#### 方式 2：编程式训练
+### 2. 在线训练（SAC）
 
-```python
-from config import make_bc_config, load_config_from_yaml
-from model import ModelGroup, MLPPolicy
-from buffer import DataHub
-from core import TrainingLoop
-from scripts.train import create_model_group
-
-# 1. 加载配置
-config = load_config_from_yaml("config/train_config.yaml", "offline_bc")
-
-# 2. 创建数据中心
-data_hub = DataHub(
-    demo_paths=config.data.demo_paths,
-    load_images=False
-)
-
-# 3. 创建模型组
-model_group = create_model_group(config)
-
-# 4. 启动训练
-trainer = TrainingLoop(
-    model_group=model_group,
-    data_hub=data_hub,
-    config=config.training,
-    algo_config=config.algorithm,
-    device=config.device
-)
-trainer.run()
+```bash
+python scripts/train_online.py --config config/train_config.yaml --name online_sac_dummy --warmup 1000
 ```
 
-#### 方式 3：10 行代码开始实验
+### 3. 双阶段训练（Offline → Online）
 
-```python
-from config import make_bc_config
-from scripts.train import setup_logging, create_model_group, create_data_hub
-from core import TrainingLoop
-
-config = make_bc_config()  # 使用预设配置
-logger = setup_logging(config.exp_name)
-data_hub = create_data_hub(config)
-model_group = create_model_group(config)
-trainer = TrainingLoop(model_group, data_hub, config.training, config.algorithm, config.device)
-trainer.run()
+```bash
+python scripts/train_two_stage_example.py
 ```
 
 ---
 
-## 设计理念
+## 搭建算法：双阶段 Online RL 实战
 
-### 积木式架构
+基于 **scripts/train_two_stage_example.py**，展示如何通过继承子类搭建 Offline TD3+BC → Online SAC 训练流程。
 
-框架采用 **基类 + 继承 + 注册表** 的设计模式，各模块可像积木一样自由组合：
+### 整体架构
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                            积木式组合                                            │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                 │
-│   Env 积木           Buffer 积木         Algorithm 积木      Policy 积木        │
-│   ┌─────────┐       ┌─────────┐         ┌─────────┐        ┌─────────┐        │
-│   │ BaseEnv │       │DataHub  │         │BaseAlgo │        │BasePolicy│        │
-│   └────┬────┘       └────┬────┘         └────┬────┘        └────┬────┘        │
-│        │                 │                   │                  │              │
-│   ┌────┼────┐       ┌────┼────┐         ┌────┼────┐        ┌────┼────┐        │
-│   ▼    ▼    ▼       ▼    ▼    ▼         ▼    ▼    ▼        ▼    ▼    ▼        │
-│ Real  Sim  Dummy  Demo Rollout Intv    BC  SAC  CQL      MLP  VLA Residual   │
-│                                                                                 │
-└─────────────────────────────────────────────────────────────────────────────────┘
-
-组合示例:
-  Offline BC  = DummyEnv   + DemoBuffer      + BC     + MLPPolicy
-  Online SAC  = RealEnv    + RolloutBuffer   + SAC    + GaussianPolicy  
-  HIL         = RealEnv    + Mixed(3 Buffer) + SAC    + ResidualPolicy
-  RECAP (π₀*) = SimEnv     + DemoBuffer      + [VF→AWR] + VLAPolicy
+Stage 1 (Offline TD3+BC)          Stage 2 (Online SAC)
+        ↓                                 ↓
+   ┌─────────┐                       ┌─────────┐
+   │ DummyEnv│ 生成 Demo              │ DummyEnv│ 真实交互
+   └────┬────┘                       └────┬────┘
+        │                                 │
+        ▼                                 ▼
+ ┌─────────────┐                   ┌─────────────┐
+ │SimpleBuffer │ Demo Only          │RolloutBuffer│ Online 数据
+ │   (Demo)    │                   │  + Demo     │
+ └──────┬──────┘                   └──────┬──────┘
+        │                                 │
+        ▼                                 ▼
+ ┌─────────────┐                   ┌─────────────┐
+ │DemoOnlyStrat│ 只采样 Demo        │MixedStrategy│ Demo 25% + Rollout 75%
+ └──────┬──────┘                   └──────┬──────┘
+        │                                 │
+        ▼                                 ▼
+ ┌─────────────┐                   ┌─────────────┐
+ │   TD3+BC    │ Offline 训练      │     SAC     │ Online 训练
+ │  Algorithm  │                   │  Algorithm  │
+ └──────┬──────┘                   └──────┬──────┘
+        │                                 │
+        ▼                                 ▼
+ ┌─────────────────────┐           ┌─────────────────────┐
+ │MLPGaussianPolicy    │ 权重继承  │MLPGaussianPolicy    │
+ │QNetwork × 4         │─────────▶│QNetwork × 4         │
+ └─────────────────────┘           └─────────────────────┘
 ```
 
-### 基类定义核心接口
+---
 
-每个模块有统一的基类，定义必须实现的接口：
+## 数据流转：模块间接口详解
+
+### Stage 1: Offline TD3+BC (Demo Only)
+
+#### 步骤 1: 生成 Demo 数据
+
+**涉及模块**: `DummyEnv` (继承 BaseEnv) → `SimpleBuffer` (继承 BaseBuffer)
 
 ```python
-# 环境基类
+# env/dummy_env.py
+class DummyEnv(BaseEnv):
+    def reset(self) -> EnvOutput:
+        # 返回: EnvOutput(obs, robot_state, reward=0, done=False)
+        
+    def step(self, action: Action) -> EnvOutput:
+        # 输入: Action(data=np.array)
+        # 返回: EnvOutput(obs', robot_state', reward, done)
+```
+
+**接口**: `EnvOutput` → `Transition`
+
+```python
+# scripts/train_two_stage_example.py: generate_fake_demo()
+for ep in range(num_episodes):
+    env_output = env.reset()  # EnvOutput
+    while not done:
+        action = expert_policy(env_output.robot_state)  # Action
+        next_env_output = env.step(action)              # EnvOutput
+        
+        # 构造 Transition
+        transition = Transition(
+            obs=env_output.obs,
+            robot_state=env_output.robot_state,
+            action=action,
+            reward=next_env_output.reward,
+            next_obs=next_env_output.obs,
+            next_robot_state=next_env_output.robot_state,
+            done=next_env_output.done,
+            source="demo"  # 标记数据来源
+        )
+        
+        # 写入 Demo Buffer
+        data_hub.demo_buffer.add_transition(transition)
+```
+
+**数据类型转换**:
+```
+BaseEnv.step() → EnvOutput
+                    ↓
+         构造 Transition (source="demo")
+                    ↓
+         BaseBuffer.add_transition()
+```
+
+---
+
+#### 步骤 2: 采样训练数据
+
+**涉及模块**: `DataHub` + `DemoOnlyStrategy` (继承 BaseSampleStrategy) → `Batch`
+
+```python
+# buffer/sample_strategy.py
+class DemoOnlyStrategy(BaseSampleStrategy):
+    def sample(self, buffers: Dict[str, BaseBuffer], batch_size: int) -> List[Transition]:
+        demo_buffer = buffers.get("demo")
+        return demo_buffer.sample_transitions(batch_size)
+```
+
+**接口**: `List[Transition]` → `Batch`
+
+```python
+# buffer/data_hub.py
+def sample(self, batch_size: int, strategy: str) -> Batch:
+    strategy_obj = create_strategy(strategy)  # DemoOnlyStrategy
+    transitions = strategy_obj.sample(self.buffers, batch_size)  # List[Transition]
+    return Batch.from_transitions(transitions)  # Batch
+```
+
+**Batch 数据结构**:
+```python
+@dataclass
+class Batch:
+    robot_state: Tensor    # [B, state_dim]
+    action: Tensor         # [B, action_dim]
+    reward: Tensor         # [B]
+    next_robot_state: Tensor  # [B, state_dim]
+    done: Tensor           # [B]
+    # obs: Optional[Dict[str, Tensor]]  # 可选的图像数据
+```
+
+**数据类型转换**:
+```
+BaseSampleStrategy.sample() → List[Transition]
+                                    ↓
+                Batch.from_transitions() (数据堆叠)
+                                    ↓
+                    Batch (tensor 格式)
+```
+
+---
+
+#### 步骤 3: 算法训练
+
+**涉及模块**: `TD3_BC` (继承 BaseAlgorithm) + `ModelGroup`
+
+```python
+# algorithm/td3_bc.py
+class TD3_BC(BaseAlgorithm):
+    def train_step(self, batch: Batch) -> Dict[str, float]:
+        # 输入: Batch (已转为 GPU tensor)
+        
+        # 1. 从 ModelGroup 获取模型
+        policy = self.model_group.get("policy")       # MLPGaussianPolicy
+        q1 = self.model_group.get("q1")               # QNetwork
+        q2 = self.model_group.get("q2")               # QNetwork
+        target_q1 = self.model_group.get("target_q1") # QNetwork (冻结)
+        
+        # 2. 计算 Q-loss
+        current_q1 = q1(batch.robot_state, batch.action)
+        target_q = compute_target(target_q1, batch)
+        q_loss = F.mse_loss(current_q1, target_q)
+        
+        # 3. 计算 Policy-loss (BC + TD3)
+        pred_action = policy.act(batch.robot_state)
+        bc_loss = F.mse_loss(pred_action, batch.action)  # 行为克隆
+        q_value = q1(batch.robot_state, pred_action)
+        policy_loss = bc_loss - 0.1 * q_value.mean()  # TD3 部分
+        
+        # 4. 反向传播
+        self.q_optimizer.zero_grad()
+        q_loss.backward()
+        self.q_optimizer.step()
+        
+        self.policy_optimizer.zero_grad()
+        policy_loss.backward()
+        self.policy_optimizer.step()
+        
+        # 5. 软更新 Target 网络
+        self._soft_update_target(tau=0.005)
+        
+        return {"q_loss": q_loss.item(), "policy_loss": policy_loss.item()}
+```
+
+**接口**: `Batch` → `Dict[str, float]` (metrics)
+
+**数据类型转换**:
+```
+TrainingLoop.run()
+    ↓
+batch = data_hub.sample(...)  # Batch
+    ↓
+batch = batch.to(device)      # 转移到 GPU
+    ↓
+metrics = algorithm.train_step(batch)  # Dict[str, float]
+    ↓
+logger.log(metrics)
+```
+
+---
+
+### Stage 2: Online SAC (Demo + Rollout Mixed)
+
+#### 步骤 1: 环境交互（推理循环）
+
+**涉及模块**: `MLPGaussianPolicy` (继承 BasePolicy) → `DummyEnv` → `RolloutBuffer`
+
+```python
+# model/mlp_policy.py
+class MLPGaussianPolicy(BasePolicy):
+    def sample(self, obs: Dict, robot_state: Tensor) -> Tuple[Tensor, Tensor]:
+        # 输入: robot_state [1, state_dim]
+        # 输出: (action [1, action_dim], log_prob [1])
+        mean, log_std = self.network(robot_state)
+        std = log_std.exp()
+        dist = Normal(mean, std)
+        action = dist.rsample()  # 重参数化采样
+        log_prob = dist.log_prob(action).sum(-1)
+        return torch.tanh(action), log_prob  # 限制到 [-1, 1]
+```
+
+**推理交互流程**:
+
+```python
+# scripts/train_two_stage_example.py: run_stage2_online()
+inference_policy = copy.deepcopy(policy)
+inference_policy.eval()
+
+env_output = env.reset()
+
+for step in range(max_steps):
+    # 1. 推理得到动作
+    with torch.no_grad():
+        state_tensor = torch.FloatTensor(env_output.robot_state.raw_state).unsqueeze(0)
+        action_data, _ = inference_policy.sample({}, state_tensor)  # Tensor [1, action_dim]
+        action_data = action_data.squeeze(0).numpy()  # numpy [action_dim]
+    
+    action = Action(data=action_data)
+    
+    # 2. 执行动作
+    prev_robot_state = env_output.robot_state
+    env_output = env.step(action)  # EnvOutput
+    
+    # 3. 构造 Transition
+    transition = Transition(
+        robot_state=prev_robot_state,
+        action=action,
+        reward=env_output.reward,
+        next_robot_state=env_output.robot_state,
+        done=env_output.done,
+        source="rollout"  # 标记为在线数据
+    )
+    
+    # 4. 写入 Rollout Buffer
+    data_hub.write(transition, source="rollout")
+```
+
+**接口**: `BasePolicy.sample()` → `Action` → `EnvOutput` → `Transition`
+
+**数据类型转换**:
+```
+BasePolicy.sample() → Tensor (action)
+                        ↓
+            转换为 Action(data=numpy)
+                        ↓
+            BaseEnv.step(Action) → EnvOutput
+                        ↓
+            构造 Transition (source="rollout")
+                        ↓
+            RolloutBuffer.add_transition()
+```
+
+---
+
+#### 步骤 2: 混合采样（Demo + Rollout）
+
+**涉及模块**: `MixedStrategy` (继承 BaseSampleStrategy)
+
+```python
+# buffer/sample_strategy.py
+class MixedStrategy(BaseSampleStrategy):
+    def __init__(self, demo_ratio: float = 0.25):
+        self.demo_ratio = demo_ratio
+        self.rollout_ratio = 1.0 - demo_ratio
+    
+    def sample(self, buffers: Dict[str, BaseBuffer], batch_size: int) -> List[Transition]:
+        demo_buffer = buffers.get("demo")
+        rollout_buffer = buffers.get("rollout")
+        
+        # 关键逻辑: Rollout 为空时自动退化为纯 Demo
+        if len(rollout_buffer) == 0:
+            return demo_buffer.sample_transitions(batch_size)
+        
+        # 混合采样
+        demo_size = int(batch_size * self.demo_ratio)      # 25% Demo
+        rollout_size = batch_size - demo_size              # 75% Rollout
+        
+        transitions = []
+        transitions.extend(demo_buffer.sample_transitions(demo_size))
+        transitions.extend(rollout_buffer.sample_transitions(rollout_size))
+        return transitions
+```
+
+**接口**: `Dict[str, BaseBuffer]` → `List[Transition]`
+
+**数据流转过程**:
+```
+初期 (Rollout=0):
+    MixedStrategy.sample() → 自动退化为纯 Demo
+    返回 64 条 Demo Transition
+
+中期 (Rollout 增长):
+    MixedStrategy.sample() → 混合采样
+    返回 16 条 Demo + 48 条 Rollout
+
+后期 (Rollout 充足):
+    MixedStrategy.sample() → 稳定混合比例
+    返回 16 条 Demo (25%) + 48 条 Rollout (75%)
+```
+
+---
+
+#### 步骤 3: SAC 训练
+
+**涉及模块**: `SAC` (继承 BaseAlgorithm)
+
+```python
+# algorithm/sac.py
+class SAC(BaseAlgorithm):
+    def train_step(self, batch: Batch) -> Dict[str, float]:
+        # 输入: Batch (混合了 Demo 和 Rollout 数据)
+        
+        # 1. 计算 Q-loss
+        with torch.no_grad():
+            next_action, next_log_prob = self.policy.sample({}, batch.next_robot_state)
+            target_q1 = self.target_q1(batch.next_robot_state, next_action)
+            target_q2 = self.target_q2(batch.next_robot_state, next_action)
+            target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_prob
+            target_value = batch.reward + self.gamma * (1 - batch.done) * target_q
+        
+        current_q1 = self.q1(batch.robot_state, batch.action)
+        current_q2 = self.q2(batch.robot_state, batch.action)
+        q_loss = F.mse_loss(current_q1, target_value) + F.mse_loss(current_q2, target_value)
+        
+        # 2. 计算 Policy-loss (带熵正则)
+        new_action, log_prob = self.policy.sample({}, batch.robot_state)
+        q_value = torch.min(
+            self.q1(batch.robot_state, new_action),
+            self.q2(batch.robot_state, new_action)
+        )
+        policy_loss = (self.alpha * log_prob - q_value).mean()
+        
+        # 3. 反向传播
+        self.q_optimizer.zero_grad()
+        q_loss.backward()
+        self.q_optimizer.step()
+        
+        self.policy_optimizer.zero_grad()
+        policy_loss.backward()
+        self.policy_optimizer.step()
+        
+        # 4. 软更新 Target
+        self._soft_update_target(tau=0.005)
+        
+        return {"q_loss": q_loss.item(), "policy_loss": policy_loss.item()}
+```
+
+**接口**: `Batch` → `Dict[str, float]`
+
+**关键特性**: SAC 不关心数据来源（Demo 或 Rollout），统一处理混合 Batch。
+
+---
+
+#### 步骤 4: 权重同步（训练 → 推理）
+
+**涉及模块**: `SharedMemorySync` (继承 BaseWeightSync)
+
+```python
+# core/weight_sync.py
+class SharedMemorySync(BaseWeightSync):
+    def push(self, state_dict: Dict[str, Tensor], version: int):
+        # 训练进程调用: 将权重推送到共享内存
+        
+    def pull(self) -> Tuple[Optional[Dict], int]:
+        # 推理进程调用: 从共享内存拉取最新权重
+```
+
+**权重同步流程**:
+
+```python
+# 训练循环中
+for step in range(max_steps):
+    # ... 环境交互 ...
+    
+    # 训练
+    batch = data_hub.sample(batch_size=64, strategy="mixed", demo_ratio=0.25)
+    metrics = algorithm.train_step(batch)
+    
+    # 每 10 步同步一次权重
+    if step % 10 == 0:
+        inference_policy.load_state_dict(policy.state_dict())
+```
+
+**接口**: `state_dict` (Dict) → 推理 Policy 更新
+
+**数据类型转换**:
+```
+训练 Policy.state_dict() → Dict[str, Tensor]
+                            ↓
+    inference_policy.load_state_dict(...)
+                            ↓
+    推理 Policy 权重更新 → 下一轮推理使用新策略
+```
+
+---
+
+## 完整数据流转总结
+
+### Stage 1: Offline TD3+BC
+
+```
+DummyEnv.reset()
+    → EnvOutput
+        → 构造 Transition (source="demo")
+            → SimpleBuffer.add_transition()
+                → DemoOnlyStrategy.sample()
+                    → List[Transition]
+                        → Batch.from_transitions()
+                            → Batch (GPU)
+                                → TD3_BC.train_step()
+                                    → ModelGroup (Policy, Q1, Q2, Target Q)
+                                        → 梯度更新
+                                            → 权重保存在 ModelGroup
+```
+
+### Stage 2: Online SAC
+
+```
+推理循环:
+    MLPGaussianPolicy.sample()
+        → Tensor (action)
+            → Action(data=numpy)
+                → DummyEnv.step()
+                    → EnvOutput
+                        → Transition (source="rollout")
+                            → RolloutBuffer.add_transition()
+
+训练循环:
+    MixedStrategy.sample()
+        → Demo Buffer (25%) + Rollout Buffer (75%)
+            → List[Transition]
+                → Batch (GPU)
+                    → SAC.train_step()
+                        → ModelGroup (继承 Stage 1 权重)
+                            → 梯度更新
+                                → 权重同步
+                                    → inference_policy.load_state_dict()
+```
+
+---
+
+## 关键接口说明
+
+### 1. BaseEnv 接口
+
+```python
 class BaseEnv(ABC):
     @abstractmethod
-    def reset(self) -> EnvOutput: ...
-    @abstractmethod  
-    def step(self, action) -> EnvOutput: ...
-
-# 算法基类
-class BaseAlgorithm(ABC):
+    def reset(self, task_id=None) -> EnvOutput:
+        """返回初始观测"""
+        
     @abstractmethod
-    def train_step(self, batch) -> Dict[str, float]: ...
+    def step(self, action: Action) -> EnvOutput:
+        """执行动作，返回下一状态"""
+```
 
-# 策略基类
-class BasePolicy(ABC):
-    @abstractmethod
-    def forward(self, obs, state) -> Tensor: ...
-    @abstractmethod
-    def act(self, obs, state) -> Action: ...
+**输入输出**:
+- 输入: `Action(data=np.array)`
+- 输出: `EnvOutput(obs, robot_state, reward, done, info)`
 
-# Buffer 基类
+---
+
+### 2. BaseBuffer 接口
+
+```python
 class BaseBuffer(ABC):
     @abstractmethod
-    def add(self, data): ...
+    def add_transition(self, transition: Transition):
+        """添加单条 transition"""
+        
     @abstractmethod
-    def sample(self, batch_size) -> Batch: ...
+    def sample_transitions(self, batch_size: int) -> List[Transition]:
+        """随机采样 batch_size 条数据"""
 ```
 
-### 注册表实现即插即用
+**输入输出**:
+- 输入: `Transition` 或 `Episode`
+- 输出: `List[Transition]`
 
-新增实现后注册到对应表，即可在配置中使用：
+---
+
+### 3. BaseSampleStrategy 接口
 
 ```python
-# 1. 继承基类实现
-class MyCustomEnv(BaseEnv):
-    def reset(self): ...
-    def step(self, action): ...
-
-# 2. 注册
-ENV_REGISTRY["my_env"] = MyCustomEnv
-
-# 3. 配置中使用
-# env:
-#   name: "my_env"
+class BaseSampleStrategy(ABC):
+    @abstractmethod
+    def sample(self, buffers: Dict[str, BaseBuffer], batch_size: int) -> List[Transition]:
+        """从多个 buffer 中按策略采样"""
 ```
 
-**注册表映射关系：**
+**输入输出**:
+- 输入: `Dict[str, BaseBuffer]` (demo, rollout, intervention)
+- 输出: `List[Transition]`
 
-| 模块 | 基类 | 注册表 | 配置字段 |
-|------|------|--------|---------|
-| 环境 | `BaseEnv` | `ENV_REGISTRY` | `env.name` |
-| 算法 | `BaseAlgorithm` | `ALGORITHM_REGISTRY` | `algorithm.name` |
-| 策略 | `BasePolicy` | `POLICY_REGISTRY` | `model.policy_type` |
-| 采样 | `BaseSampleStrategy` | `STRATEGY_REGISTRY` | `sample_strategy` |
-| 同步 | `BaseWeightSync` | `WEIGHT_SYNC_REGISTRY` | `weight_sync.method` |
+---
 
-### 扩展任意模块的统一流程
-
-```
-1. 找到基类 → 2. 继承实现 → 3. 注册 → 4. 配置使用
-```
-
-**示例：新增 PPO 算法**
+### 4. BaseAlgorithm 接口
 
 ```python
-# algorithm/ppo.py
-class PPO(BaseAlgorithm):
-    def train_step(self, batch):
-        # ... PPO 实现
-        return {"policy_loss": ..., "value_loss": ...}
+class BaseAlgorithm(ABC):
+    @abstractmethod
+    def train_step(self, batch: Batch) -> Dict[str, float]:
+        """单步训练，返回 metrics"""
+```
 
-# algorithm/__init__.py  
-ALGORITHM_REGISTRY["ppo"] = PPO
+**输入输出**:
+- 输入: `Batch` (GPU tensor)
+- 输出: `Dict[str, float]` (loss 和其他指标)
 
-# config/train_config.yaml
-algorithm:
-  name: "ppo"  # 直接使用
+---
+
+### 5. BasePolicy 接口
+
+```python
+class BasePolicy(ABC):
+    @abstractmethod
+    def forward(self, obs: Dict, robot_state: Tensor) -> Tensor:
+        """前向传播，返回动作分布参数"""
+        
+    @abstractmethod
+    def act(self, obs: Dict, robot_state: Tensor, deterministic: bool = False) -> Action:
+        """采样动作"""
+```
+
+**输入输出**:
+- 输入: `robot_state: Tensor [B, state_dim]`
+- 输出: `Action(data=np.array)` 或 `Tensor`
+
+---
+
+## 扩展到大模型训练（Physical Intelligence π₀ 为例）
+
+Physical Intelligence 的 π₀ 模型使用 **VLA (Vision-Language-Action)** 架构，结合视觉、语言和动作预测。在本框架中可以这样实现：
+
+### 1. 实现 VLA Policy
+
+```python
+# model/vla_policy.py
+class VLAPolicy(BasePolicy):
+    def __init__(self, vision_encoder, language_encoder, action_decoder):
+        self.vision_encoder = vision_encoder      # 预训练的视觉编码器 (如 CLIP)
+        self.language_encoder = language_encoder  # 预训练的语言编码器 (如 T5)
+        self.action_decoder = action_decoder      # 动作解码器 (Transformer)
+    
+    def forward(self, obs: Dict, robot_state: Tensor) -> Tensor:
+        # 1. 编码视觉输入
+        image_embeds = self.vision_encoder(obs["images"])  # [B, D_vision]
+        
+        # 2. 编码语言指令
+        text_embeds = self.language_encoder(obs["language"])  # [B, D_text]
+        
+        # 3. 拼接状态
+        state_embeds = torch.cat([image_embeds, text_embeds, robot_state], dim=-1)
+        
+        # 4. 解码动作
+        action_params = self.action_decoder(state_embeds)  # [B, action_dim]
+        return action_params
+    
+    def act(self, obs: Dict, robot_state: Tensor, deterministic: bool = False) -> Action:
+        action_params = self.forward(obs, robot_state)
+        if deterministic:
+            action_data = action_params  # 确定性动作
+        else:
+            # 添加探索噪声
+            noise = torch.randn_like(action_params) * 0.1
+            action_data = action_params + noise
+        return Action(data=action_data.cpu().numpy())
+```
+
+**注册到框架**:
+
+```python
+# model/__init__.py
+from .vla_policy import VLAPolicy
+POLICY_REGISTRY["vla"] = VLAPolicy
 ```
 
 ---
 
-## 快速开始：配置驱动训练
-
-### 1. 编辑配置文件
+### 2. 配置 π₀ 训练
 
 ```yaml
 # config/train_config.yaml
 configs:
-  my_bc_exp:
-    exp_name: "my_bc_experiment"
+  pi0_bc:
+    exp_name: "pi0_bc_training"
     device: "cuda"
     
     env:
-      state_dim: 65
-      action_dim: 37
+      name: "real_robot"  # 实际机器人环境
+      state_dim: 65       # 关节位置 + 速度
+      action_dim: 37      # 关节控制
     
     data:
       type: "hdf5"
       demo_paths:
-        - "/path/to/demos/**/*.hdf5"
-      load_images: false
+        - "/data/robot_demos/task1/*.hdf5"
+        - "/data/robot_demos/task2/*.hdf5"
+      load_images: true    # 加载图像数据
+      camera_keys: ["wrist_cam", "third_person_cam"]
     
     model:
-      policy_type: "mlp"
-      hidden_dims: [256, 256, 128]
+      policy_type: "vla"
+      vision_encoder: "clip_vitb32"    # CLIP ViT-B/32
+      language_encoder: "t5_base"      # T5-base
+      action_decoder: "transformer"    # Transformer decoder
+      hidden_dims: [1024, 512]
     
     algorithm:
       name: "bc"
-      lr: 3.0e-4
-      batch_size: 64
+      lr: 1.0e-4
+      batch_size: 32       # VLA 模型较大，batch size 较小
+      weight_decay: 0.01
     
     training:
       stages:
-        - name: "bc_train"
-          algorithm: "bc"
-          max_steps: 10000
-          active_models: ["policy"]
+        - name: "bc_pretrain"
+          max_steps: 100000
           sample_strategy: "demo_only"
-      checkpoint_dir: "./checkpoints/my_bc"
-```
-
-### 2. 运行训练
-
-```bash
-python scripts/train.py --config config/train_config.yaml --name my_bc_exp
-```
-
-### 3. 查看结果
-
-```
-checkpoints/my_bc/
-└── final_policy.pt    # 训练好的模型
+          active_models: ["policy"]
+      checkpoint_dir: "./checkpoints/pi0_bc"
 ```
 
 ---
 
-## 完整场景：从零构建新训练流程
-
-假设你要实现 **DQN (Deep Q-Network) + 优先级经验回放 (PER)** 的离线训练。
-
-### 场景需求分析
-
-```
-目标: 使用 Q-learning 训练策略
-数据: 专家演示 (HDF5)
-算法: DQN + Double DQN + PER
-策略: Q 网络 (输出每个动作的 Q 值)
-采样: 优先级采样 (TD-error 作为优先级)
-```
-
-### 实现步骤
-
-#### 1. 实现 Q 网络策略
+### 3. 三阶段训练流程（模仿 π₀）
 
 ```python
-# model/q_network.py
-class QNetwork(BasePolicy):
-    def __init__(self, state_dim, action_dim, hidden_dims):
-        # ... 构建 MLP 网络
-    
-    def forward(self, obs, robot_state):
-        return self.network(robot_state)  # → (B, action_dim) Q值
-    
-    def act(self, obs, robot_state, deterministic=True):
-        q_values = self.forward(...)
-        action_idx = q_values.argmax() if deterministic else epsilon_greedy(...)
-        return Action(data=action_idx, space="discrete")
+# scripts/train_pi0_three_stage.py
 
-# model/__init__.py
-POLICY_REGISTRY["q_network"] = QNetwork
-```
+# Stage 1: 预训练 VLA (BC on Demo)
+config_stage1 = load_config_from_yaml("config/train_config.yaml", "pi0_bc")
+model_group = create_vla_model_group(config_stage1)
+data_hub = DataHub(demo_paths=config_stage1.data.demo_paths, load_images=True)
 
-#### 2. 实现 DQN 算法
-
-```python
-# algorithm/dqn.py
-class DQN(BaseAlgorithm):
-    def __init__(self, model_group, config):
-        self.q_network = model_group.get("q_network")
-        self.target_q = model_group.get("target_q")
-        # ... 初始化优化器
-    
-    def train_step(self, batch):
-        # 计算当前 Q 值
-        q_values = self.q_network.forward(...)
-        
-        # 计算目标 Q 值 (Double DQN)
-        target_q = reward + gamma * target_q_network(next_state)
-        
-        # TD Loss
-        loss = mse_loss(q_values, target_q)
-        loss.backward()
-        optimizer.step()
-        
-        # 软更新 target 网络
-        self._soft_update_target()
-        
-        return {"q_loss": loss.item()}
-
-# algorithm/__init__.py
-ALGORITHM_REGISTRY["dqn"] = DQN
-```
-
-#### 3. 实现优先级采样策略
-
-```python
-# buffer/prioritized_strategy.py
-class PrioritizedReplayStrategy(BaseSampleStrategy):
-    def sample(self, buffers, batch_size):
-        # 计算采样概率: P(i) = priority[i]^α / Σ priority^α
-        probs = priorities ** self.alpha / sum(priorities ** self.alpha)
-        indices = np.random.choice(len(buffer), size=batch_size, p=probs)
-        return [buffer[i] for i in indices]
-    
-    def update_priorities(self, indices, td_errors):
-        self.priorities[indices] = abs(td_errors) + ε
-
-# buffer/sample_strategy.py
-STRATEGY_REGISTRY["prioritized"] = PrioritizedReplayStrategy
-```
-
-#### 4. 扩展 train.py 创建模型
-
-```python
-# scripts/train.py
-def create_model_group(config):
-    if config.algorithm.name == "dqn":
-        q_network = QNetwork(state_dim, action_dim, hidden_dims)
-        target_q = copy.deepcopy(q_network)
-        
-        model_group.add("q_network", q_network, frozen=False)
-        model_group.add("target_q", target_q, frozen=True)
-```
-
-#### 5. 配置文件
-
-```yaml
-# config/train_config.yaml
-configs:
-  dqn_offline:
-    model:
-      policy_type: "q_network"
-    algorithm:
-      name: "dqn"
-      tau: 0.005  # 软更新系数
-    training:
-      stages:
-        - algorithm: "dqn"
-          active_models: ["q_network"]
-          sample_strategy: "prioritized"
-          sample_kwargs: {alpha: 0.6, beta: 0.4}
-```
-
-#### 6. 运行
-
-```bash
-python scripts/train.py --config config/train_config.yaml --name dqn_offline
-```
-
-### 训练数据流
-
-```
-HDF5 → HDF5DemoBuffer → PrioritizedSampler → Batch
-         (lazy load)      (TD-error权重)      ↓
-                                        Q-Network.forward()
-                                              ↓
-                                        TD Loss 计算
-                                              ↓
-                                        反向传播 + 梯度更新
-                                              ↓
-                                        软更新 Target Q
-                                              ↓
-                                        更新采样优先级
-```
-
-### 扩展优势总结
-
-通过这个完整案例可以看到：
-
-1. **无需修改核心代码**：所有新增功能都通过继承基类实现
-2. **注册即可用**：新模块注册后立即可在配置中引用
-3. **配置驱动**：通过 YAML 配置组合不同模块
-4. **复用现有基础设施**：
-   - DataHub 处理数据加载
-   - TrainingLoop 管理训练循环
-   - ModelGroup 管理模型注册/冻结
-
-**框架的价值在于**：将重复的"脚手架代码"抽象成可复用的基础设施，让开发者专注于算法本身的实现。
-
----
-
-## 开发指南：添加新的 Offline 算法
-
-### CQL (Conservative Q-Learning) 示例
-
-#### 1. 实现算法类
-
-```python
-# algorithm/cql.py
-class CQL(BaseAlgorithm):
-    def __init__(self, model_group, config):
-        self.q1 = model_group.get("q1")
-        self.cql_alpha = config.cql_alpha
-    
-    def train_step(self, batch):
-        # 标准 Q-loss
-        q_loss = compute_td_loss(...)
-        # Conservative 惩罚项
-        cql_loss = (logsumexp(Q_values) - Q(s, a_real)).mean()
-        total_loss = q_loss + self.cql_alpha * cql_loss
-        # backward + optimize ...
-        return {"q_loss": q_loss.item(), "cql_loss": cql_loss.item()}
-
-# algorithm/__init__.py
-ALGORITHM_REGISTRY["cql"] = CQL
-```
-
-#### 2. 添加配置
-
-```yaml
-# config/train_config.yaml
-configs:
-  cql_offline:
-    algorithm:
-      name: "cql"
-      cql_alpha: 5.0  # Conservative 惩罚系数
-    training:
-      stages:
-        - algorithm: "cql"
-          max_steps: 50000
-```
-
-#### 3. 运行
-
-```bash
-python scripts/train.py --config config/train_config.yaml --name cql_offline
-```
-
----
-
-## 核心概念
-
-### DataHub：三源数据管理
-
-```python
-from buffer import DataHub
-
-data_hub = DataHub(
-    demo_paths=["demos/*.hdf5"],     # Demo: 专家演示 (只读)
-    rollout_capacity=100000,          # Rollout: 策略采集 (FIFO)
-    intervention_capacity=50000,      # Intervention: 人工干预
+trainer_stage1 = TrainingLoop(
+    model_group=model_group,
+    data_hub=data_hub,
+    config=config_stage1.training,
+    algo_config=config_stage1.algorithm
 )
+trainer_stage1.run()  # 训练 100k 步
 
-# 写入数据
-data_hub.write(episode, source="rollout")       # 在线采集
-data_hub.write(transition, source="intervention") # 人工干预
+# Stage 2: 价值函数训练 (VF Regression)
+vf_network = VNetwork(state_dim=65, hidden_dims=[512, 512])
+model_group.add("vf", vf_network, frozen=False)
+model_group.freeze("policy")  # 冻结 policy
 
-# 采样数据 (通过 Sampler)
-batch = data_hub.sample(batch_size=64, strategy="demo_only")
-batch = data_hub.sample(batch_size=64, strategy="mixed", demo_ratio=0.5)
-```
+algo_config_stage2 = AlgorithmConfig(name="vf_regression", lr=3e-4)
+trainer_stage2 = TrainingLoop(
+    model_group=model_group,
+    data_hub=data_hub,
+    config=config_stage1.training,
+    algo_config=algo_config_stage2
+)
+trainer_stage2.run()
 
-### ModelGroup：模型注册与冻结
-
-```python
-from model import ModelGroup, MLPPolicy
-
-model_group = ModelGroup()
-
-# 添加模型
-model_group.add("policy", MLPPolicy(...), frozen=False)
-model_group.add("base_policy", pretrained_vla, frozen=True)  # 冻结
-
-# 阶段性冻结/解冻
-model_group.freeze("policy")
+# Stage 3: 策略微调 (AWR with VF)
 model_group.unfreeze("policy")
+model_group.freeze("vf")  # 冻结价值函数
 
-# 获取可训练参数
-params = model_group.trainable_parameters(["policy"])
+algo_config_stage3 = AlgorithmConfig(name="awr", lr=1e-4)
+trainer_stage3 = TrainingLoop(
+    model_group=model_group,
+    data_hub=data_hub,
+    config=config_stage1.training,
+    algo_config=algo_config_stage3
+)
+trainer_stage3.run()
 ```
 
-### Stage：多阶段训练
+---
 
-```yaml
-training:
-  stages:
-    - name: "train_vf"        # 阶段1: 训练价值函数
-      algorithm: "vf_regression"
-      max_steps: 50000
-      active_models: ["vf"]
-      sample_strategy: "demo_only"
-      
-    - name: "train_policy"    # 阶段2: 训练策略
-      algorithm: "awr"
-      max_steps: 50000
-      active_models: ["policy"]
-      sample_strategy: "demo_only"
+### 4. 数据流转（VLA 场景）
+
+```
+HDF5 文件 (包含图像 + 语言 + 动作)
+    ↓
+HDF5DemoBuffer.sample_transitions()
+    ↓
+List[Transition] (每个 Transition 包含 obs["images"], obs["language"])
+    ↓
+Batch.from_transitions()
+    ↓
+Batch (GPU tensor):
+    - obs["images"]: [B, C, H, W]
+    - obs["language"]: [B, max_seq_len]
+    - robot_state: [B, 65]
+    - action: [B, 37]
+    ↓
+VLAPolicy.forward()
+    - vision_encoder(images) → [B, 512]
+    - language_encoder(text) → [B, 768]
+    - cat([vision, language, state]) → [B, 1345]
+    - action_decoder → [B, 37]
+    ↓
+BC.train_step()
+    - loss = MSE(predicted_action, batch.action)
+    - backward() → 更新 VLA 权重
 ```
 
-### WeightSync：训练/推理分离
+---
+
+### 5. 与本框架的适配点
+
+| π₀ 组件 | 本框架对应模块 | 实现方式 |
+|---------|---------------|----------|
+| VLA 模型 | `VLAPolicy` (继承 BasePolicy) | 新增 vla_policy.py |
+| Vision Encoder | `vision_encoder` (CLIP) | 预训练模型加载 |
+| Language Encoder | `language_encoder` (T5) | 预训练模型加载 |
+| Action Decoder | `action_decoder` (Transformer) | 自定义 Transformer |
+| 行为克隆 | `BC` (已实现) | 直接复用 |
+| 价值函数训练 | `VFRegression` (新增) | 继承 BaseAlgorithm |
+| AWR 算法 | `AWR` (新增) | 继承 BaseAlgorithm |
+| HDF5 数据 | `HDF5DemoBuffer` (已实现) | 支持图像 lazy load |
+| 多阶段训练 | `Stage` (已实现) | 直接复用 |
+
+**新增算法示例**:
 
 ```python
-from core import TrainingLoop, InferenceLoop, create_weight_sync
+# algorithm/vf_regression.py
+class VFRegression(BaseAlgorithm):
+    def train_step(self, batch: Batch) -> Dict[str, float]:
+        vf = self.model_group.get("vf")
+        target_value = batch.reward + self.gamma * vf(batch.next_robot_state) * (1 - batch.done)
+        pred_value = vf(batch.robot_state)
+        loss = F.mse_loss(pred_value, target_value.detach())
+        loss.backward()
+        self.optimizer.step()
+        return {"vf_loss": loss.item()}
 
-# 创建同步器
-weight_sync = create_weight_sync("queue")
-
-# 训练进程
-trainer = TrainingLoop(..., weight_sync=weight_sync)
-
-# 推理进程 (独立进程)
-inference = InferenceLoop(..., weight_sync=weight_sync)
-
-# 训练时自动 push 权重，推理时自动 pull
+# algorithm/awr.py
+class AWR(BaseAlgorithm):
+    def train_step(self, batch: Batch) -> Dict[str, float]:
+        vf = self.model_group.get("vf")
+        policy = self.model_group.get("policy")
+        
+        # 计算优势函数
+        with torch.no_grad():
+            value = vf(batch.robot_state)
+            advantage = batch.reward + self.gamma * vf(batch.next_robot_state) - value
+            weight = torch.exp(advantage / self.beta).clamp(max=20.0)
+        
+        # 加权行为克隆
+        pred_action = policy.act(batch.obs, batch.robot_state)
+        loss = (weight * F.mse_loss(pred_action, batch.action, reduction='none')).mean()
+        loss.backward()
+        self.optimizer.step()
+        return {"awr_loss": loss.item()}
 ```
-
----
-
-## 采样策略
-
-| 策略 | 说明 | 使用场景 |
-|-----|------|---------|
-| `demo_only` | 仅从 Demo 采样 | Offline BC/CQL |
-| `rollout_only` | 仅从 Rollout 采样 | Online RL |
-| `mixed` | 混合采样 (可配比例) | HIL/Fine-tuning |
-
-```python
-# 自定义采样策略
-from buffer import BaseSampleStrategy, STRATEGY_REGISTRY
-
-class PrioritizedStrategy(BaseSampleStrategy):
-    def sample(self, buffers, batch_size):
-        # 实现优先级采样
-        ...
-
-STRATEGY_REGISTRY["prioritized"] = PrioritizedStrategy
-```
-
----
-
-## 注册表模式
-
-框架使用注册表模式支持扩展：
-
-| 注册表 | 位置 | 用途 |
-|-------|------|-----|
-| `ALGORITHM_REGISTRY` | `algorithm/__init__.py` | 注册新算法 |
-| `POLICY_REGISTRY` | `model/__init__.py` | 注册新策略网络 |
-| `ENV_REGISTRY` | `env/__init__.py` | 注册新环境 |
-| `STRATEGY_REGISTRY` | `buffer/sample_strategy.py` | 注册采样策略 |
-| `WEIGHT_SYNC_REGISTRY` | `core/weight_sync.py` | 注册同步方式 |
-
----
-
-## 📚 文档
-
-> 💡 **不知道看哪个文档？** 参考 [文档导航指南](DOCS_GUIDE.md)
-
-- **[QUICKREF.md](QUICKREF.md)** - 5 分钟速查表 ⚡
-  - 常用配置模板
-  - API 速查
-  - 问题排查
-
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 框架设计哲学与架构详解 📖
-  - 为什么这个设计是优雅的？
-  - 设计模式详解
-  - 模块化设计分析
-  - 扩展性分析
-
-- **[docs/TWO_STAGE_TRAINING.md](docs/TWO_STAGE_TRAINING.md)** - 两阶段训练指南 🎯
-  - Offline → Online 训练流程
-  - 数据流架构详解
-  - 使用示例和常见问题
-  - 相关工作对比
-
-- **[CHANGELOG.md](CHANGELOG.md)** - 版本更新历史 📝
-  - 版本特性
-  - 升级指南
-
-- **[.github/copilot-instructions.md](.github/copilot-instructions.md)** - AI 编码助手指南 🤖
-  - 快速上手指南
-  - 注册表模式使用
-  - 添加新算法示例
-
----
-
-## 🤝 贡献
-
-欢迎贡献！请遵循以下步骤：
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 开启 Pull Request
-
----
-
-## 📄 License
-
-本项目基于 MIT 协议开源 - 查看 [LICENSE](LICENSE) 文件了解详情。
-
----
-
-## 🙏 致谢
-
-- 框架设计参考了 Stable-Baselines3, CleanRL, RLlib 等优秀项目
-- 感谢所有贡献者的支持
-
----
-
-## 📧 联系方式
-
-- **GitHub Issues**: [提交问题](https://github.com/hhzhsg/RL-unified-framework/issues)
-- **作者**: hhzhsg
-
----
-
-**⭐ 如果这个项目对您有帮助，请给个 Star！**
