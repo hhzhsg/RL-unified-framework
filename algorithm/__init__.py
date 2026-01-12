@@ -8,12 +8,14 @@ from .base_algorithm import BaseAlgorithm
 from .bc import BC
 from .sac import SAC
 from .td3_bc import TD3BC
+from .recap import RECAPAlgorithm, RECAPTrainer, create_recap_models
 
 # 算法注册表
 ALGORITHM_REGISTRY = {
     "bc": BC,
     "sac": SAC,
     "td3_bc": TD3BC,
+    "recap": RECAPAlgorithm,
 }
 
 
@@ -59,8 +61,11 @@ __all__ = [
     "BC",
     "SAC",
     "TD3BC",
+    "RECAPAlgorithm",
+    "RECAPTrainer",
     # 工厂函数
     "create_algorithm",
     "register_algorithm",
+    "create_recap_models",
     "ALGORITHM_REGISTRY",
 ]
