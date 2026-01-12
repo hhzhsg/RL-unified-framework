@@ -289,9 +289,8 @@ class HDF5DemoBuffer(BaseBuffer):
         return RobotState(
             joint_pos=state[0:14],         # arm/position
             joint_vel=state[14:28],        # arm/velocity
-            ee_pos=state[46:52],           # end/position 前6维
-            ee_quat=None,
-            gripper_pos=float(state[44]),  # effector/pos[0]
+            ee_pos=state[46:52] if len(state) > 52 else np.zeros(3, dtype=np.float32),  # end/position 前3维
+            gripper=float(state[44]) if len(state) > 44 else 0.0,  # effector/pos[0]
             raw_state=state,               # 保存完整 65 维
         )
     

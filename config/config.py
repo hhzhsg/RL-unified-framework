@@ -54,6 +54,7 @@ class StageConfig:
     max_steps: int = 100000
     active_models: List[str] = field(default_factory=lambda: ["policy", "q1", "q2"])
     sample_strategy: str = "rollout_only"
+    sample_kwargs: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,6 +92,10 @@ class DataSourceConfig:
     load_images: bool = False
     rollout_capacity: int = 100000
     intervention_capacity: int = 10000
+
+
+# 兼容别名
+BufferConfig = DataSourceConfig
 
 
 @dataclass
@@ -141,7 +146,15 @@ def _dict_to_config(d: Dict) -> Config:
     if 'model' in d:
         config.model = ModelConfig(**d['model'])
     if 'algorithm' in d:
-        config.algorithm = AlgorithmConfig(**d['algorithm'])
+        algo_dict = d['algorithm'].copy()
+        # 提取已知字段，其余放入 algo_kwargs
+        known_fields = {'name', 'lr', 'batch_size', 'gamma', 'tau', 'alpha', 'auto_alpha', 'algo_kwargs'}
+        algo_kwargs = algo_dict.pop('algo_kwargs', {})
+        for key in list(algo_dict.keys()):
+            if key not in known_fields:
+                algo_kwargs[key] = algo_dict.pop(key)
+        algo_dict['algo_kwargs'] = algo_kwargs
+        config.algorithm = AlgorithmConfig(**algo_dict)
     if 'training' in d:
         training_dict = d['training'].copy()
         if 'stages' in training_dict:

@@ -277,7 +277,9 @@ class InferenceLoop:
             
             # 写入数据
             if self.data_hub is not None:
-                self.data_hub.write(transition, source=source)
+                rollout_dataset = self.data_hub.get_dataset("rollout")
+                if rollout_dataset:
+                    rollout_dataset.buffer.add_transition(transition)
             
             # 如果 episode 结束，重置环境
             if env_output.done:

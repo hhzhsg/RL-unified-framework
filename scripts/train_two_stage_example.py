@@ -138,7 +138,7 @@ def run_stage1_offline(model_group: ModelGroup, data_hub: DataHub,
     # 训练循环
     for step in range(1, max_steps + 1):
         # 从 Demo 采样
-        batch = data_hub.sample(batch_size=64, strategy="demo_only")
+        batch = data_hub.sample_by_source(batch_size=64, source_weights={"demo": 1.0})
         batch = batch.to(device)
         
         # 训练
@@ -219,7 +219,7 @@ def run_stage2_online(model_group: ModelGroup, data_hub: DataHub, env: DummyEnv,
         )
         
         # 写入 Rollout buffer
-        data_hub.write(transition, source="rollout")
+        data_hub.rollout_buffer.add_transition(transition)
         rollout_count += 1
         
         # Episode 结束
@@ -229,12 +229,19 @@ def run_stage2_online(model_group: ModelGroup, data_hub: DataHub, env: DummyEnv,
             env_output = env.reset()
         
         # ========== 2. 训练（混合采样）==========
-        # 使用 mixed 策略：demo_ratio=0.25，rollout 为空时自动退化为纯 demo
-        batch = data_hub.sample(
-            batch_size=64, 
-            strategy="mixed",
-            demo_ratio=0.25
-        )
+        # 使用 sample_by_source：demo 25%, rollout 75%（rollout 为空时自动退化为纯 demo）
+        rollout_size = len(data_hub.rollout_buffer)
+        if rollout_size > 0:
+            batch = data_hub.sample_by_source(
+                batch_size=64, 
+                source_weights={"demo": 0.25, "rollout": 0.75}
+            )
+        else:
+            # Rollout 为空，纯 Demo
+            batch = data_hub.sample_by_source(
+                batch_size=64,
+                source_weights={"demo": 1.0}
+            )
         batch = batch.to(device)
         
         metrics = algorithm.train_step(batch)
@@ -278,12 +285,20 @@ def main():
     env = DummyEnv(env_config)
     logger.info(f"[Setup] Environment: DummyEnv (state={state_dim}, action={action_dim})")
     
-    # 创建 DataHub（同时支持 Demo 和 Rollout）
-    data_hub = DataHub(
-        demo_paths=None,  # 我们手动生成 demo
-        rollout_capacity=10000,
-    )
-    logger.info(f"[Setup] DataHub created")
+    # 创建 DataHub
+    from buffer import RolloutBuffer, SimpleReplayBuffer
+    
+    data_hub = DataHub()
+    
+    # 注册 Demo buffer
+    demo_buffer = SimpleReplayBuffer(max_size=100000)
+    data_hub.register_dataset("demo", demo_buffer, weight=1.0, source_tag="demo")
+    
+    # 注册 Rollout buffer  
+    rollout_buffer = RolloutBuffer(max_size=10000)
+    data_hub.register_dataset("rollout", rollout_buffer, weight=1.0, source_tag="rollout")
+    
+    logger.info(f"[Setup] DataHub created with datasets: {data_hub.dataset_names}")
     
     # 创建模型组
     model_group = create_model_group(state_dim, action_dim)

@@ -161,3 +161,33 @@ class ModelGroup:
                 "frozen": self._frozen[name],
             }
         return summary
+
+    def save(self, path: str, names: Optional[List[str]] = None):
+        """
+        保存模型权重到文件
+        
+        Args:
+            path: 保存路径
+            names: 指定模型名称列表，None 表示所有模型
+        """
+        state = {
+            "models": self.state_dict(names),
+            "frozen": {name: self._frozen[name] for name in (names or self._models.keys())},
+        }
+        torch.save(state, path)
+    
+    def load(self, path: str, strict: bool = True):
+        """
+        从文件加载模型权重
+        
+        Args:
+            path: 文件路径
+            strict: 是否严格匹配
+        """
+        state = torch.load(path, map_location="cpu")
+        
+        if "models" in state:
+            self.load_state_dict(state["models"], strict=strict)
+        else:
+            # 兼容旧格式 (直接保存 state_dict)
+            self.load_state_dict(state, strict=strict)

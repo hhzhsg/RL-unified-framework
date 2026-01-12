@@ -107,7 +107,9 @@ def create_model_group(config: Config) -> ModelGroup:
 
 
 def create_data_hub(config: Config, data_config: DataSourceConfig) -> DataHub:
-    """根据配置创建数据中心"""
+    """根据配置创建数据中心 (新 API: register_dataset)"""
+    from buffer import RolloutBuffer, SimpleReplayBuffer
+    from buffer.hdf5_buffer import HDF5DemoBuffer
     
     # 展开 glob 模式
     demo_paths = []
@@ -115,21 +117,28 @@ def create_data_hub(config: Config, data_config: DataSourceConfig) -> DataHub:
         expanded = glob.glob(pattern, recursive=True)
         demo_paths.extend(expanded)
     
-    if data_config.type == "hdf5":
-        return DataHub(
-            demo_paths=demo_paths if demo_paths else None,
-            demo_format="hdf5",
-            camera_keys=data_config.camera_keys,
+    # 创建 DataHub
+    data_hub = DataHub()
+    
+    if data_config.type == "hdf5" and demo_paths:
+        # HDF5 Demo Buffer
+        demo_buffer = HDF5DemoBuffer(
+            demo_paths=demo_paths,
+            camera_keys=data_config.camera_keys if data_config.camera_keys else [],
             load_images=data_config.load_images,
-            rollout_capacity=data_config.rollout_capacity,
-            intervention_capacity=data_config.intervention_capacity,
         )
-    else:
-        return DataHub(
-            demo_paths=None,
-            rollout_capacity=data_config.rollout_capacity,
-            intervention_capacity=data_config.intervention_capacity,
-        )
+        data_hub.register_dataset("demo", demo_buffer, weight=1.0, source_tag="demo")
+    elif demo_paths:
+        # 普通 Demo Buffer
+        demo_buffer = SimpleReplayBuffer(max_size=100000)
+        data_hub.register_dataset("demo", demo_buffer, weight=1.0, source_tag="demo")
+    
+    # Rollout Buffer (用于在线数据)
+    rollout_capacity = getattr(data_config, 'rollout_capacity', 100000)
+    rollout_buffer = RolloutBuffer(max_size=rollout_capacity)
+    data_hub.register_dataset("rollout", rollout_buffer, weight=0.0, source_tag="rollout")
+    
+    return data_hub
 
 
 def validate_config(config: Config):
@@ -201,15 +210,24 @@ def main():
     data_hub = create_data_hub(config, data_config)
     
     stats = data_hub.get_statistics()
-    logger.info(f"  Demo Episodes: {stats['demo']['num_episodes']}")
-    logger.info(f"  Demo Transitions: {stats['demo']['num_transitions']}")
+    demo_stats = stats["datasets"].get("demo", {})
+    num_transitions = demo_stats.get("size", 0)
     
-    if stats['demo']['num_transitions'] == 0:
+    logger.info(f"  Demo Transitions: {num_transitions}")
+    logger.info(f"  Total Datasets: {stats['num_datasets']}")
+    
+    if num_transitions == 0:
         raise ValueError("没有加载到任何 demo 数据！请检查 data.demo_paths 配置")
     
-    # 自动检测维度
-    actual_state_dim = stats['demo'].get('state_dim', config.env.state_dim)
-    actual_action_dim = stats['demo'].get('action_dim', config.env.action_dim)
+    # 从 HDF5 Buffer 获取维度信息
+    demo_dataset = data_hub.get_dataset("demo")
+    if demo_dataset and hasattr(demo_dataset.buffer, 'get_statistics'):
+        buffer_stats = demo_dataset.buffer.get_statistics()
+        actual_state_dim = buffer_stats.get('state_dim', config.env.state_dim)
+        actual_action_dim = buffer_stats.get('action_dim', config.env.action_dim)
+    else:
+        actual_state_dim = config.env.state_dim
+        actual_action_dim = config.env.action_dim
     
     if actual_state_dim != config.env.state_dim:
         logger.warning(f"  状态维度不匹配: 配置={config.env.state_dim}, 实际={actual_state_dim}")

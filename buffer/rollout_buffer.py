@@ -70,3 +70,22 @@ class RolloutBuffer(BaseBuffer):
         self._transitions.clear()
         self._episodes.clear()
         self._current_episode = None
+
+    def sample_episodes(self, batch_size: int) -> List[Episode]:
+        """随机采样 episodes"""
+        if len(self._episodes) < batch_size:
+            return list(self._episodes)
+        return random.sample(self._episodes, batch_size)
+
+    def _get_save_data(self):
+        """获取需要保存的数据"""
+        return {
+            "transitions": list(self._transitions),
+            "episodes": self._episodes,
+        }
+
+    def _load_from_data(self, data):
+        """从数据加载"""
+        self._transitions = deque(data["transitions"], maxlen=self.max_size)
+        self._episodes = data["episodes"]
+        self._current_episode = None

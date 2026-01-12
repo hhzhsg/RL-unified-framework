@@ -111,10 +111,21 @@ class TrainingLoop:
         while not stage.is_finished and self._running:
             # 采样
             try:
-                batch = self.data_hub.sample(
+                # 根据 sample_strategy 决定采样比例
+                if stage.sample_strategy == "demo_only":
+                    source_weights = {"demo": 1.0}
+                elif stage.sample_strategy == "rollout_only":
+                    source_weights = {"rollout": 1.0}
+                elif stage.sample_strategy == "mixed":
+                    demo_ratio = stage.sample_kwargs.get("demo_ratio", 0.25)
+                    source_weights = {"demo": demo_ratio, "rollout": 1.0 - demo_ratio}
+                else:
+                    # 默认按权重采样
+                    source_weights = {"demo": 0.5, "rollout": 0.5}
+                
+                batch = self.data_hub.sample_by_source(
                     batch_size=algorithm.config.batch_size,
-                    strategy=stage.sample_strategy,
-                    **stage.sample_kwargs
+                    source_weights=source_weights
                 )
             except ValueError as e:
                 print(f"[Training] Warning: {e}. Waiting for data...")

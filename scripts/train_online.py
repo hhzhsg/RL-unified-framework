@@ -120,16 +120,20 @@ def create_model_group(config: Config) -> ModelGroup:
 
 def create_data_hub(config: Config) -> DataHub:
     """创建 DataHub（仅 Rollout Buffer）"""
+    from buffer import RolloutBuffer
+    
     data_config = getattr(config, 'data', None)
     
     rollout_capacity = 100000
     if data_config and hasattr(data_config, 'rollout_capacity'):
         rollout_capacity = data_config.rollout_capacity
     
-    return DataHub(
-        demo_paths=None,  # Online 不需要 demo
-        rollout_capacity=rollout_capacity,
-    )
+    # 新 DataHub API: 使用 register_dataset
+    data_hub = DataHub()
+    rollout_buffer = RolloutBuffer(max_size=rollout_capacity)
+    data_hub.register_dataset("rollout", rollout_buffer, weight=1.0, source_tag="rollout")
+    
+    return data_hub
 
 
 def warmup_buffer(
@@ -217,14 +221,15 @@ def training_worker(
     
     while step < total_steps and not stop_event.is_set():
         # 检查 buffer 是否有足够数据
-        if len(data_hub.rollout_buffer) < batch_size:
+        rollout_dataset = data_hub.get_dataset("rollout")
+        if not rollout_dataset or len(rollout_dataset.buffer) < batch_size:
             time.sleep(0.1)
             continue
         
-        # 采样
-        batch = data_hub.sample(
+        # 采样 (新 API: sample_by_source)
+        batch = data_hub.sample_by_source(
             batch_size=batch_size,
-            strategy="rollout_only"
+            source_weights={"rollout": 1.0}
         )
         
         # 训练

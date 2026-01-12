@@ -68,7 +68,7 @@ class TD3BC(BaseAlgorithm):
         )
         
         # 设备
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = next(self.policy.parameters()).device
     
     def _validate_model_group(self):
         """验证 model_group 包含所需模型"""

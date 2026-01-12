@@ -10,8 +10,8 @@ VLA-RL 核心模块
 from .stage import Stage
 from .weight_sync import (
     BaseWeightSync,
-    QueueWeightSync,
-    SharedMemoryWeightSync,
+    QueueSync,
+    SharedMemorySync,
     create_weight_sync,
     WEIGHT_SYNC_REGISTRY,
 )
@@ -21,8 +21,8 @@ from .inference_loop import InferenceLoop, HistoryBuffer
 __all__ = [
     "Stage",
     "BaseWeightSync",
-    "QueueWeightSync",
-    "SharedMemoryWeightSync",
+    "QueueSync",
+    "SharedMemorySync",
     "create_weight_sync",
     "WEIGHT_SYNC_REGISTRY",
     "TrainingLoop",

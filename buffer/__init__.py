@@ -8,7 +8,8 @@ VLA-RL Buffer 模块
 """
 from .base_buffer import BaseBuffer
 from .rollout_buffer import RolloutBuffer
-from .data_hub import DataHub, SimpleBuffer
+from .data_hub import DataHub
+from .simple_replay_buffer import SimpleReplayBuffer
 from .sample_strategy import (
     BaseSampleStrategy,
     DemoOnlyStrategy,
@@ -31,7 +32,7 @@ __all__ = [
     "BaseBuffer",
     "RolloutBuffer",
     "DataHub",
-    "SimpleBuffer",
+    "SimpleReplayBuffer",
     "BaseSampleStrategy",
     "DemoOnlyStrategy",
     "RolloutOnlyStrategy",
