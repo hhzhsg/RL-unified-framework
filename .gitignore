@@ -152,8 +152,11 @@ $RECYCLE.BIN/
 !requirements.txt
 !README.md
 !LICENSE
-!.github/copilot-instructions.md
 
 # 保留 checkpoints 目录结构（但忽略模型文件）
 !checkpoints/.gitkeep
 !checkpoints/*/.gitkeep
+
+# ============ Copilot 配置 ============
+# GitHub Copilot 配置文件（本地使用，不上传）
+.github/copilot-instructions.md

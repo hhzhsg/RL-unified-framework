@@ -1,7 +1,10 @@
 """
 数据中心
 
-统一管理多个数据源 (demo, rollout, intervention)，提供统一的采样接口
+统一管理三种数据源:
+- demo: 预训练的专家数据 (离线数据，如HDF5)
+- rollout: policy实时推理的轨迹数据 (在线RL收集)
+- intervention: rollout过程中人类专家介入的数据 (在线纠正)
 """
 from typing import Dict, List, Optional, Union
 import torch
@@ -15,34 +18,55 @@ class DataHub:
     数据中心
     
     职责:
-    1. 管理多个 Buffer (demo, rollout, intervention)
+    1. 管理三种 Buffer:
+       - demo: 预训练专家数据 (HDF5Buffer)
+       - rollout: 在线交互轨迹 (ReplayBuffer)
+       - intervention: 人工介入纠正 (InterventionBuffer, 持久化)
     2. 提供统一的写入/采样接口
-    3. 支持不同采样策略
+    3. 支持不同采样策略 (demo_only, rollout_only, mixed)
     
     Example:
         hub = DataHub()
-        hub.register_buffer("demo", demo_buffer)
-        hub.register_buffer("rollout", rollout_buffer)
         
-        # 写入数据
+        # 注册 demo buffer (预训练数据)
+        hub.register_buffer("demo", HDF5DemoBuffer("data.hdf5"))
+        
+        # rollout 和 intervention 会自动创建
+        
+        # 在线交互: 写入 rollout
         hub.write(transition, source="rollout")
         
-        # 采样
+        # 人工介入: 写入 intervention
+        hub.write(intervention_transition, source="intervention")
+        
+        # 采样: 混合三种数据源
+        batch = hub.sample(batch_size=64, strategy="mixed")
         batch = hub.sample(batch_size=64, strategy="mixed")
     """
     
-    def __init__(self, rollout_capacity: int = 100000):
+    def __init__(self, 
+                 rollout_capacity: int = 100000,
+                 intervention_capacity: int = 10000,
+                 intervention_save_path: Optional[str] = None):
         """
         Args:
-            rollout_capacity: rollout buffer 容量 (便捷参数)
+            rollout_capacity: rollout buffer 容量
+            intervention_capacity: intervention buffer 容量
+            intervention_save_path: intervention 持久化路径
         """
         self._buffers: Dict[str, "BaseBuffer"] = {}
         self._samplers: Dict[str, BaseSampler] = {}
         self._default_sampler = "demo_only"
         
-        # 便捷初始化: 自动创建 rollout buffer
-        from buffer import ReplayBuffer
+        # 自动创建 rollout buffer
+        from buffer import ReplayBuffer, InterventionBuffer
         self._buffers["rollout"] = ReplayBuffer(max_size=rollout_capacity)
+        
+        # 自动创建 intervention buffer
+        self._buffers["intervention"] = InterventionBuffer(
+            max_size=intervention_capacity,
+            save_path=intervention_save_path,
+        )
     
     def register_buffer(self, name: str, buffer: "BaseBuffer"):
         """
@@ -65,6 +89,10 @@ class DataHub:
     @property
     def rollout_buffer(self) -> "BaseBuffer":
         return self._buffers["rollout"]
+    
+    @property
+    def intervention_buffer(self) -> Optional["BaseBuffer"]:
+        return self._buffers.get("intervention")
     
     def write(self, data: Union[Transition, "Episode"], source: str = "rollout"):
         """
