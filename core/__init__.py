@@ -1,31 +1,30 @@
 """
-VLA-RL 核心模块
+核心模块
 
-提供:
+包含:
+- ModelGroup: 模型组管理
 - TrainingLoop: 训练循环
 - InferenceLoop: 推理循环
 - WeightSync: 权重同步
-- Stage: 训练阶段
 """
-from .stage import Stage
+from .model_group import ModelGroup
+from .training_loop import TrainingLoop
+from .inference_loop import InferenceLoop
 from .weight_sync import (
     BaseWeightSync,
-    QueueSync,
     SharedMemorySync,
+    QueueSync,
     create_weight_sync,
-    WEIGHT_SYNC_REGISTRY,
+    SYNC_REGISTRY,
 )
-from .training_loop import TrainingLoop
-from .inference_loop import InferenceLoop, HistoryBuffer
 
 __all__ = [
-    "Stage",
-    "BaseWeightSync",
-    "QueueSync",
-    "SharedMemorySync",
-    "create_weight_sync",
-    "WEIGHT_SYNC_REGISTRY",
+    "ModelGroup",
     "TrainingLoop",
     "InferenceLoop",
-    "HistoryBuffer",
+    "BaseWeightSync",
+    "SharedMemorySync",
+    "QueueSync",
+    "create_weight_sync",
+    "SYNC_REGISTRY",
 ]

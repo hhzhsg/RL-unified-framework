@@ -1,16 +1,16 @@
 """
-VLA-RL Behavior Cloning (BC)
+Behavior Cloning (BC)
 
-最简单的离线学习算法：监督学习模仿专家数据
+监督学习的行为克隆算法
 """
 from typing import Dict
 import torch
+import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 
-from .base_algorithm import BaseAlgorithm
-from model import ModelGroup
+from .base import BaseAlgorithm
 from data import Batch
+from core import ModelGroup
 from config import AlgorithmConfig
 
 
@@ -18,10 +18,10 @@ class BC(BaseAlgorithm):
     """
     Behavior Cloning
     
-    要求 ModelGroup 包含:
-    - policy: 任意 Policy (MLPPolicy 或 MLPGaussianPolicy)
+    最简单的离线模仿学习算法: 最小化专家动作的 MSE 损失
     
-    Loss: MSE(predicted_action, expert_action)
+    要求 ModelGroup 包含:
+    - policy: 策略网络
     """
     
     REQUIRED_MODELS = ["policy"]
@@ -31,41 +31,40 @@ class BC(BaseAlgorithm):
             config = AlgorithmConfig(name="bc", lr=1e-4)
         super().__init__(model_group, config)
         
-        self._validate_model_group()
-        
         self.policy = model_group.get("policy")
         
         # 优化器
         self.optimizer = optim.Adam(
             self.policy.parameters(),
-            lr=config.lr
+            lr=config.lr,
         )
         
-        # 设备
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # 损失函数
+        self.loss_fn = nn.MSELoss()
     
     def train_step(self, batch: Batch) -> Dict[str, float]:
         """训练一步"""
-        self.model_group.train(["policy"])
+        self.policy.train()
         
-        # 转换为 tensor
-        batch = batch.to(self.device)
-        
-        # 前向
+        # 前向传播
         pred_action = self.policy.forward(batch.obs, batch.robot_state)
         
-        # 损失
-        loss = F.mse_loss(pred_action, batch.action)
+        # 计算损失
+        loss = self.loss_fn(pred_action, batch.action)
         
         # 反向传播
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
+        
+        # 梯度裁剪 (可选)
+        if hasattr(self.config, 'grad_clip') and self.config.grad_clip > 0:
+            nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.grad_clip)
+        
         self.optimizer.step()
         
         self._train_step_count += 1
         
         return {
             "loss": loss.item(),
-            "train_step": self._train_step_count,
+            "bc_loss": loss.item(),
         }

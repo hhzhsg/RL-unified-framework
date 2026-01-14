@@ -1,8 +1,12 @@
 """
-VLA-RL 环境模块
+环境模块
+
+包含:
+- BaseEnv: 环境基类
+- DummyEnv: 测试环境
 """
-from .base_env import BaseEnv
-from .dummy_env import DummyEnv
+from .base import BaseEnv
+from .dummy import DummyEnv
 
 # 环境注册表
 ENV_REGISTRY = {
@@ -11,33 +15,24 @@ ENV_REGISTRY = {
 
 
 def create_env(config) -> BaseEnv:
-    """根据配置创建环境"""
-    from config import Config, EnvConfig
+    """
+    创建环境
     
-    if isinstance(config, Config):
-        env_config = config.env
-    elif isinstance(config, EnvConfig):
-        env_config = config
-    else:
-        raise ValueError(f"Unknown config type: {type(config)}")
-    
-    env_cls = ENV_REGISTRY.get(env_config.name)
-    if env_cls is None:
-        raise ValueError(f"Unknown env: {env_config.name}. Available: {list(ENV_REGISTRY.keys())}")
-    
-    return env_cls(env_config)
-
-
-def register_env(name: str, env_cls):
-    """注册新环境"""
-    ENV_REGISTRY[name] = env_cls
-    return env_cls
+    Args:
+        config: 环境配置
+        
+    Returns:
+        环境实例
+    """
+    env_name = config.name if hasattr(config, 'name') else "dummy"
+    if env_name not in ENV_REGISTRY:
+        raise ValueError(f"Unknown env: {env_name}. Available: {list(ENV_REGISTRY.keys())}")
+    return ENV_REGISTRY[env_name](config)
 
 
 __all__ = [
     "BaseEnv",
     "DummyEnv",
-    "create_env",
-    "register_env",
     "ENV_REGISTRY",
+    "create_env",
 ]

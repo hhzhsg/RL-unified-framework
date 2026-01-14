@@ -1,8 +1,8 @@
 """
-VLA-RL 核心数据类型定义
+数据类型定义
 
-定义框架中所有模块共享的数据结构:
-- Observation: 观测数据 (图像 + 语言)
+框架中所有模块共享的数据结构:
+- Observation: 观测数据 (图像 + 语言指令)
 - RobotState: 机器人状态
 - Action: 动作
 - EnvOutput: 环境输出
@@ -38,11 +38,15 @@ class RobotState:
     """
     机器人状态
     
+    支持两种使用方式:
+    1. 结构化: 使用 joint_pos, ee_pos 等字段
+    2. 原始向量: 使用 raw_state 字段
+    
     Attributes:
-        joint_pos: 关节位置 (7,)
-        joint_vel: 关节速度 (7,)
-        ee_pos: 末端位置 (3,)
-        ee_quat: 末端四元数 (4,)
+        joint_pos: 关节位置
+        joint_vel: 关节速度
+        ee_pos: 末端位置
+        ee_quat: 末端四元数
         gripper: 夹爪状态
         raw_state: 原始状态向量 (用于简单环境)
     """
@@ -99,7 +103,7 @@ class EnvOutput:
 @dataclass
 class Transition:
     """
-    单步数据
+    单步数据 (s, a, r, s', done)
     
     Attributes:
         obs: 当前观测
@@ -184,3 +188,35 @@ class Batch:
     
     def __len__(self) -> int:
         return self.robot_state.shape[0]
+    
+    @classmethod
+    def from_transitions(cls, transitions: List[Transition]) -> "Batch":
+        """从 Transition 列表构建 Batch"""
+        if not transitions:
+            raise ValueError("Cannot create Batch from empty transitions")
+        
+        robot_states = []
+        actions = []
+        rewards = []
+        next_robot_states = []
+        dones = []
+        sources = []
+        
+        for t in transitions:
+            robot_states.append(t.robot_state.to_array())
+            actions.append(t.action.data)
+            rewards.append(t.reward)
+            next_robot_states.append(t.next_robot_state.to_array())
+            dones.append(float(t.done))
+            sources.append(t.source)
+        
+        return cls(
+            obs={},  # 简化版本，不处理图像
+            robot_state=torch.tensor(np.array(robot_states), dtype=torch.float32),
+            action=torch.tensor(np.array(actions), dtype=torch.float32),
+            reward=torch.tensor(rewards, dtype=torch.float32),
+            next_obs={},
+            next_robot_state=torch.tensor(np.array(next_robot_states), dtype=torch.float32),
+            done=torch.tensor(dones, dtype=torch.float32),
+            source=sources,
+        )

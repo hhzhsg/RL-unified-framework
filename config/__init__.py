@@ -1,41 +1,33 @@
 """
-VLA-RL 配置模块
+配置模块
 
-提供:
+包含:
 - 各模块配置 dataclass
-- YAML 配置加载
+- YAML 配置加载/保存
 """
-from .config import (
-    # 配置类
+from .base import (
     Config,
     EnvConfig,
-    BufferConfig,
-    DataSourceConfig,
     ModelConfig,
     AlgorithmConfig,
-    StageConfig,
+    DataConfig,
     TrainingConfig,
     InferenceConfig,
     WeightSyncConfig,
-    # 加载函数
-    load_config_from_yaml,
-    get_data_config,
 )
+from .loader import load_config_from_yaml, save_config_to_yaml
 
 __all__ = [
     # 配置类
     "Config",
     "EnvConfig",
-    "BufferConfig",
-    "DataSourceConfig",
     "ModelConfig",
     "AlgorithmConfig",
-    "StageConfig",
+    "DataConfig",
     "TrainingConfig",
     "InferenceConfig",
     "WeightSyncConfig",
     # 加载函数
     "load_config_from_yaml",
-    "get_data_config",
+    "save_config_to_yaml",
 ]
-
