@@ -57,3 +57,38 @@ class QCriticEnsemble(BasePolicy):
     
     def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Any:
         raise NotImplementedError("Critic does not have act()")
+
+
+@register_policy("discrete_critic")
+class DiscreteCritic(BasePolicy):
+    """离散动作的 Critic（用于 gripper / discrete action Q）"""
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+
+        self.state_dim = config.get("state_dim")
+        # input_dim is observation encoding only
+        hidden_dims = config.get("discrete_hidden_dims", [128, 128])
+        output_dim = config.get("num_discrete_actions", 3)
+
+        layers = []
+        prev_dim = self.state_dim
+        for dim in hidden_dims:
+            layers.extend([
+                nn.Linear(prev_dim, dim),
+                nn.LayerNorm(dim),
+                nn.ReLU(),
+            ])
+            prev_dim = dim
+        layers.append(nn.Linear(prev_dim, output_dim))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        state = obs["state"]
+        return self.net(state)
+
+    def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Any:
+        with torch.no_grad():
+            q = self.forward(obs)
+            return torch.argmax(q, dim=-1)

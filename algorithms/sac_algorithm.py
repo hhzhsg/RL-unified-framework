@@ -36,6 +36,12 @@ class SACAlgorithm(BaseOffPolicyAlgorithm):
         self.alpha_optimizer = torch.optim.Adam(
             [self.policy.log_alpha], lr=self.alpha_lr
         )
+        # Optional discrete critic optimizer
+        self.has_discrete = hasattr(self.policy, "discrete_critic") and getattr(self.policy, "discrete_critic") is not None
+        if self.has_discrete:
+            self.discrete_optimizer = torch.optim.Adam(
+                self.policy.discrete_critic.parameters(), lr=self.critic_lr
+            )
     
     def update(self, batch: Dict[str, Any]) -> Dict[str, float]:
         # 转换为tensor
@@ -59,6 +65,25 @@ class SACAlgorithm(BaseOffPolicyAlgorithm):
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
+
+        # 1b. Discrete critic (DQN-style) 更新（如果存在）
+        if self.has_discrete:
+            # assume discrete action is encoded in last dimension of action
+            actions_discrete = action[:, -1:].long()
+            with torch.no_grad():
+                next_discrete_q_online = self.policy.get_discrete_q(next_obs, use_target=False)
+                best_next = next_discrete_q_online.argmax(dim=1, keepdim=True)
+                next_discrete_q_target = self.policy.get_discrete_q(next_obs, use_target=True)
+                target_next_q = next_discrete_q_target.gather(1, best_next)
+                target_discrete = reward + (1 - done) * self.gamma * target_next_q
+
+            pred_discrete_qs = self.policy.get_discrete_q(obs, use_target=False)
+            pred_taken = pred_discrete_qs.gather(1, actions_discrete)
+            discrete_loss = F.mse_loss(pred_taken, target_discrete)
+
+            self.discrete_optimizer.zero_grad()
+            discrete_loss.backward()
+            self.discrete_optimizer.step()
         
         # 2. Actor更新
         new_action, log_prob = self.policy.sample(obs)
@@ -82,13 +107,16 @@ class SACAlgorithm(BaseOffPolicyAlgorithm):
         
         self._train_step += 1
         
-        return {
+        ret = {
             "critic_loss": critic_loss.item(),
             "actor_loss": actor_loss.item(),
             "alpha_loss": alpha_loss.item(),
             "alpha": self.policy.alpha.item(),
             "q_value": min_q.mean().item(),
         }
+        if self.has_discrete:
+            ret["discrete_loss"] = discrete_loss.item()
+        return ret
     
     def update_target(self) -> None:
         self.policy.update_target(self.tau)
@@ -102,6 +130,7 @@ class SACAlgorithm(BaseOffPolicyAlgorithm):
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
             "alpha_optimizer": self.alpha_optimizer.state_dict(),
+            **({"discrete_optimizer": self.discrete_optimizer.state_dict()} if self.has_discrete else {}),
             "train_step": self._train_step,
         }, path)
     
@@ -111,4 +140,6 @@ class SACAlgorithm(BaseOffPolicyAlgorithm):
         self.actor_optimizer.load_state_dict(ckpt["actor_optimizer"])
         self.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
         self.alpha_optimizer.load_state_dict(ckpt["alpha_optimizer"])
+        if self.has_discrete and "discrete_optimizer" in ckpt:
+            self.discrete_optimizer.load_state_dict(ckpt["discrete_optimizer"])
         self._train_step = ckpt["train_step"]

@@ -40,6 +40,19 @@ class SACPolicy(BasePolicy):
         
         # Target entropy
         self.target_entropy = -config["action_dim"]
+
+        # Optional discrete critic (for grippers / hybrid policies)
+        self.num_discrete_actions = config.get("num_discrete_actions", None)
+        if self.num_discrete_actions is not None:
+            from policies.components.critics.q_critic import DiscreteCritic
+
+            # discrete critic and its target
+            dcfg = dict(config)
+            dcfg["num_discrete_actions"] = self.num_discrete_actions
+            self.discrete_critic = DiscreteCritic(dcfg)
+            self.discrete_critic_target = copy.deepcopy(self.discrete_critic)
+            for p in self.discrete_critic_target.parameters():
+                p.requires_grad = False
     
     @property
     def alpha(self) -> torch.Tensor:
@@ -52,17 +65,37 @@ class SACPolicy(BasePolicy):
         return self.actor.act(obs, deterministic)
     
     def sample(self, obs: Dict[str, torch.Tensor]):
-        return self.actor.sample(obs)
+        # Returns continuous action and log_prob; if discrete critic exists, append discrete action (argmax)
+        action_cont, log_prob = self.actor.sample(obs)
+        if self.num_discrete_actions is not None:
+            # compute discrete Q and pick argmax as discrete action
+            with torch.no_grad():
+                qvals = self.discrete_critic(obs)  # [B, num_actions]
+                discrete_action = torch.argmax(qvals, dim=-1, keepdim=True).float()
+            action = torch.cat([action_cont, discrete_action], dim=-1)
+            return action, log_prob
+        return action_cont, log_prob
     
     def get_q_values(self, obs: Dict[str, torch.Tensor], action: torch.Tensor):
         return self.critics(obs, action)
     
     def get_target_q_values(self, obs: Dict[str, torch.Tensor], action: torch.Tensor):
         return self.target_critics(obs, action)
+
+    def get_discrete_q(self, obs: Dict[str, torch.Tensor], use_target: bool = False) -> torch.Tensor:
+        if self.num_discrete_actions is None:
+            raise RuntimeError("Discrete critic not configured")
+        if use_target:
+            return self.discrete_critic_target(obs)
+        return self.discrete_critic(obs)
     
     def update_target(self, tau: float = 0.005):
         for p, tp in zip(self.critics.parameters(), self.target_critics.parameters()):
             tp.data.copy_(tau * p.data + (1 - tau) * tp.data)
+
+        if self.num_discrete_actions is not None:
+            for p, tp in zip(self.discrete_critic.parameters(), self.discrete_critic_target.parameters()):
+                tp.data.copy_(tau * p.data + (1 - tau) * tp.data)
     
     def reset(self):
         pass
