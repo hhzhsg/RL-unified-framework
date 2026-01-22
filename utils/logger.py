@@ -1,92 +1,59 @@
-"""
-日志工具
-
-简单的日志记录功能
-"""
+"""日志工具"""
 import logging
-import sys
-from typing import Optional, Dict, Any
-from datetime import datetime
+from typing import Dict, Any, Optional
+from pathlib import Path
+import json
+import time
 
 
-def setup_logger(
-    name: str,
-    level: int = logging.INFO,
-    log_file: Optional[str] = None,
-) -> logging.Logger:
-    """
-    设置 logger
+class Logger:
+    """日志器"""
     
-    Args:
-        name: logger 名称
-        level: 日志级别
-        log_file: 日志文件路径 (可选)
+    def __init__(self, log_dir: str = "./logs", name: str = "rl_framework"):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         
-    Returns:
-        配置好的 logger
-    """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(logging.INFO)
+        
+        # Console handler
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
+        ch.setFormatter(formatter)
+        self.logger.addHandler(ch)
+        
+        # File handler
+        fh = logging.FileHandler(self.log_dir / "train.log")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(formatter)
+        self.logger.addHandler(fh)
+        
+        self._metrics_history = []
     
-    # 避免重复添加 handler
-    if logger.handlers:
-        return logger
+    def info(self, msg: str):
+        self.logger.info(msg)
     
-    # 格式
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S"
-    )
+    def debug(self, msg: str):
+        self.logger.debug(msg)
     
-    # 控制台 handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    def warning(self, msg: str):
+        self.logger.warning(msg)
     
-    # 文件 handler (可选)
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    def error(self, msg: str):
+        self.logger.error(msg)
     
-    return logger
-
-
-class MetricLogger:
-    """
-    指标记录器
-    
-    记录训练过程中的各种指标
-    """
-    
-    def __init__(self, name: str = "metrics"):
-        self.name = name
-        self.history: Dict[str, list] = {}
-        self._step = 0
-    
-    def log(self, metrics: Dict[str, float], step: Optional[int] = None):
+    def log_metrics(self, metrics: Dict[str, float], step: int):
         """记录指标"""
-        if step is not None:
-            self._step = step
+        metrics["step"] = step
+        metrics["timestamp"] = time.time()
+        self._metrics_history.append(metrics)
         
-        for key, value in metrics.items():
-            if key not in self.history:
-                self.history[key] = []
-            self.history[key].append((self._step, value))
+        metrics_str = ", ".join(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}" 
+                                for k, v in metrics.items())
+        self.info(f"[Step {step}] {metrics_str}")
     
-    def get_latest(self, key: str) -> Optional[float]:
-        """获取最新值"""
-        if key not in self.history or not self.history[key]:
-            return None
-        return self.history[key][-1][1]
-    
-    def get_average(self, key: str, window: int = 100) -> Optional[float]:
-        """获取滑动平均"""
-        if key not in self.history or not self.history[key]:
-            return None
-        values = [v for _, v in self.history[key][-window:]]
-        return sum(values) / len(values)
-    
-    def summary(self) -> Dict[str, float]:
-        """获取所有指标的最新值"""
-        return {k: v[-1][1] for k, v in self.history.items() if v}
+    def save_metrics(self):
+        """保存指标历史"""
+        with open(self.log_dir / "metrics.json", "w") as f:
+            json.dump(self._metrics_history, f, indent=2)

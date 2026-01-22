@@ -7,10 +7,21 @@
 - intervention: rollout过程中人类专家介入的数据 (在线纠正)
 """
 from typing import Dict, List, Optional, Union
-import torch
 
-from .types import Transition, Batch
-from .sampler import BaseSampler, create_sampler
+from common.types import Transition, Batch, Episode
+from data.samplers.base_sampler import BaseSampler
+from data.samplers.uniform_sampler import UniformSampler
+from data.samplers.hilserl_sampler import HILSERLSampler
+
+
+def create_sampler(strategy: str, **kwargs) -> BaseSampler:
+    """Simple factory for samplers used by DataHub when needed."""
+    if strategy == "uniform":
+        return UniformSampler(**kwargs)
+    if strategy == "hilserl":
+        return HILSERLSampler(**kwargs)
+    # default fallbacks
+    return UniformSampler(**kwargs)
 
 
 class DataHub:
@@ -58,15 +69,20 @@ class DataHub:
         self._samplers: Dict[str, BaseSampler] = {}
         self._default_sampler = "demo_only"
         
-        # 自动创建 rollout buffer
-        from buffer import ReplayBuffer, InterventionBuffer
-        self._buffers["rollout"] = ReplayBuffer(max_size=rollout_capacity)
-        
-        # 自动创建 intervention buffer
-        self._buffers["intervention"] = InterventionBuffer(
-            max_size=intervention_capacity,
-            save_path=intervention_save_path,
-        )
+        # 自动创建 rollout/intervention buffer（使用正确的本地实现签名）
+        from data.buffers.replay_buffer import ReplayBuffer
+        from data.buffers.intervention_buffer import InterventionBuffer
+        self._buffers["rollout"] = ReplayBuffer(capacity=rollout_capacity)
+        self._buffers["intervention"] = InterventionBuffer(capacity=intervention_capacity)
+
+    @property
+    def buffers(self) -> Dict[str, "BaseBuffer"]:
+        """公开内部 buffers 字典（兼容 TrainingLoop 调用）。"""
+        return self._buffers
+
+    def add(self, data: Union[Transition, Episode], source: str = "rollout"):
+        """向指定 buffer 写入数据（兼容旧 API 名称 add）。"""
+        return self.write(data, source=source)
     
     def register_buffer(self, name: str, buffer: "BaseBuffer"):
         """
@@ -94,7 +110,7 @@ class DataHub:
     def intervention_buffer(self) -> Optional["BaseBuffer"]:
         return self._buffers.get("intervention")
     
-    def write(self, data: Union[Transition, "Episode"], source: str = "rollout"):
+    def write(self, data: Union[Transition, Episode], source: str = "rollout"):
         """
         写入数据
         
@@ -106,11 +122,31 @@ class DataHub:
         if buffer is None:
             raise ValueError(f"Buffer '{source}' not registered")
         
-        from .types import Episode
+        # Accept both Episode/Transition dataclasses and plain dicts
         if isinstance(data, Episode):
-            buffer.add_episode(data)
+            for t in data.transitions:
+                if isinstance(t, dict):
+                    buffer.add(t)
+                else:
+                    buffer.add({
+                        "obs": t.obs,
+                        "action": t.action,
+                        "reward": t.reward,
+                        "next_obs": t.next_obs,
+                        "done": t.done,
+                    })
         else:
-            buffer.add_transition(data)
+            # single transition: either dict or Transition dataclass
+            if isinstance(data, dict):
+                buffer.add(data)
+            else:
+                buffer.add({
+                    "obs": data.obs,
+                    "action": data.action,
+                    "reward": data.reward,
+                    "next_obs": data.next_obs,
+                    "done": data.done,
+                })
     
     def sample(self, batch_size: int, strategy: str = "demo_only", **kwargs) -> Batch:
         """

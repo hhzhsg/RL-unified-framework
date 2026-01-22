@@ -1,30 +1,17 @@
 """
-核心模块
+Core模块
 
-包含:
-- ModelGroup: 模型组管理
-- TrainingLoop: 训练循环
-- InferenceLoop: 推理循环
-- WeightSync: 权重同步
+系统主权层 - 只包含接口定义、运行时循环、系统组装和同步机制
+禁止在此编写具体算法实现
 """
-from .model_group import ModelGroup
-from .training_loop import TrainingLoop
-from .inference_loop import InferenceLoop
-from .weight_sync import (
-    BaseWeightSync,
-    SharedMemorySync,
-    QueueSync,
-    create_weight_sync,
-    SYNC_REGISTRY,
-)
+from . import interfaces
+from . import runtime
+from . import orchestration
+from . import synchronization
 
 __all__ = [
-    "ModelGroup",
-    "TrainingLoop",
-    "InferenceLoop",
-    "BaseWeightSync",
-    "SharedMemorySync",
-    "QueueSync",
-    "create_weight_sync",
-    "SYNC_REGISTRY",
+    "interfaces",
+    "runtime",
+    "orchestration",
+    "synchronization",
 ]
