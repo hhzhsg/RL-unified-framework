@@ -53,10 +53,6 @@ RL-unified-framework/
 │   ├── inference_loop.py # 推理循环
 │   └── weight_sync.py    # 权重同步
 │
-├── robot/                 # 机器人适配器
-│   ├── base.py           # BaseRobotAdapter
-│   └── binocular.py      # 双目机器人适配器
-│
 ├── config/                # 配置模块
 │   ├── base.py           # 配置 dataclass
 │   └── loader.py         # YAML 加载器
@@ -226,30 +222,6 @@ class MyPolicy(BasePolicy):
     def act(self, obs, state, deterministic=True):
         # 实现推理
         return Action(data=action_array)
-```
-
-### 添加机器人适配器
-
-```python
-from robot import BaseRobotAdapter, RobotSpec
-
-MY_SPEC = RobotSpec(
-    name="my_robot",
-    state_dim=14,
-    action_dim=7,
-    camera_keys=["cam1", "cam2"],
-    state_keys=["joint_pos", "gripper"],
-    action_keys=["joint_pos", "gripper"],
-)
-
-class MyRobotAdapter(BaseRobotAdapter):
-    def preprocess(self, raw_data):
-        # HDF5 数据转换
-        return {"state": ..., "action": ..., "images": ...}
-    
-    def postprocess(self, model_output):
-        # 模型输出转机器人动作
-        return robot_action
 ```
 
 ## 验证测试
