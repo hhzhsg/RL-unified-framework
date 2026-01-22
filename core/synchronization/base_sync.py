@@ -1,42 +1,298 @@
 """
-同步器基类
+Actor-Learner 同步通信层
+
+基于 HIL-SERL 的分布式架构设计
+支持 Local (调试) 和 gRPC (分布式) 两种模式
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, field
+from queue import Queue, Empty
+import threading
+import pickle
+import torch
 
 
-class BaseSynchronizer(ABC):
-    """同步器基类"""
+@dataclass
+class ActorLearnerConfig:
+    """Actor-Learner 配置"""
+    learner_host: str = "localhost"
+    learner_port: int = 50051
+    weight_poll_interval: float = 0.1  # 秒
+    policy_push_frequency: int = 100   # 训练步数
+    transition_batch_size: int = 10    # 每次发送的transition数量
+
+
+# ============ 抽象接口 ============
+
+class LearnerServerInterface(ABC):
+    """Learner端服务器接口"""
     
     @abstractmethod
-    def push(self, data: Dict[str, Any], tag: str = "default") -> None:
-        """
-        推送数据
-        
-        Args:
-            data: 数据字典
-            tag: 数据标签
-        """
+    def start(self) -> None:
+        """启动服务器"""
         pass
     
     @abstractmethod
-    def pull(self, tag: str = "default") -> Optional[Dict[str, Any]]:
+    def stop(self) -> None:
+        """停止服务器"""
+        pass
+    
+    @abstractmethod
+    def recv_transitions(self, block: bool = False, timeout: float = 0.1) -> List[Dict[str, Any]]:
         """
-        拉取数据
+        接收来自Actor的transitions
         
         Args:
-            tag: 数据标签
-            
+            block: 是否阻塞等待
+            timeout: 超时时间（秒）
         Returns:
-            数据字典，如果没有新数据返回None
+            transition列表
         """
         pass
     
     @abstractmethod
-    def get_version(self, tag: str = "default") -> int:
-        """获取版本号"""
+    def publish_weights(self, state_dict: Dict[str, torch.Tensor], metadata: Optional[Dict] = None) -> None:
+        """
+        发布最新策略权重
+        
+        Args:
+            state_dict: 模型状态字典
+            metadata: 元数据（训练步数等）
+        """
+        pass
+
+
+class ActorClientInterface(ABC):
+    """Actor端客户端接口"""
+    
+    @abstractmethod
+    def connect(self) -> bool:
+        """连接到Learner服务器"""
         pass
     
-    def close(self) -> None:
-        """关闭同步器"""
+    @abstractmethod
+    def disconnect(self) -> None:
+        """断开连接"""
         pass
+    
+    @abstractmethod
+    def send_transition(self, transition: Dict[str, Any]) -> None:
+        """发送单个transition到Learner"""
+        pass
+    
+    @abstractmethod
+    def send_transitions(self, transitions: List[Dict[str, Any]]) -> None:
+        """批量发送transitions"""
+        pass
+    
+    @abstractmethod
+    def recv_weights(self, block: bool = True, timeout: float = 10.0) -> Optional[Dict[str, torch.Tensor]]:
+        """
+        接收最新策略权重
+        
+        Args:
+            block: 是否阻塞等待
+            timeout: 超时时间（秒）
+        Returns:
+            模型状态字典，无新权重时返回None
+        """
+        pass
+
+
+# ============ Local实现（用于调试，同进程） ============
+
+class LocalLearnerServer(LearnerServerInterface):
+    """
+    本地Learner服务器（基于Queue，用于调试）
+    
+    适用于单进程/多线程场景
+    """
+    
+    def __init__(self, config: Optional[ActorLearnerConfig] = None):
+        self.config = config or ActorLearnerConfig()
+        self._transition_queue: Queue = Queue()
+        self._weight_queue: Queue = Queue(maxsize=1)
+        self._running = False
+        self._lock = threading.Lock()
+        self._weight_version = 0
+    
+    def start(self) -> None:
+        self._running = True
+    
+    def stop(self) -> None:
+        self._running = False
+    
+    def recv_transitions(self, block: bool = False, timeout: float = 0.1) -> List[Dict[str, Any]]:
+        transitions = []
+        try:
+            if block:
+                t = self._transition_queue.get(timeout=timeout)
+                transitions.append(t)
+            
+            # 尽可能多地取出队列中的数据
+            while True:
+                try:
+                    t = self._transition_queue.get_nowait()
+                    transitions.append(t)
+                except Empty:
+                    break
+        except Empty:
+            pass
+        return transitions
+    
+    def publish_weights(self, state_dict: Dict[str, torch.Tensor], metadata: Optional[Dict] = None) -> None:
+        with self._lock:
+            self._weight_version += 1
+            # 清空旧权重
+            while not self._weight_queue.empty():
+                try:
+                    self._weight_queue.get_nowait()
+                except Empty:
+                    break
+            
+            # CPU序列化
+            cpu_state_dict = {k: v.cpu().clone() for k, v in state_dict.items()}
+            self._weight_queue.put({
+                "state_dict": cpu_state_dict,
+                "metadata": metadata or {},
+                "version": self._weight_version,
+            })
+    
+    # 暴露给LocalActorClient使用
+    def _get_transition_queue(self) -> Queue:
+        return self._transition_queue
+    
+    def _get_weight_queue(self) -> Queue:
+        return self._weight_queue
+
+
+class LocalActorClient(ActorClientInterface):
+    """
+    本地Actor客户端（直接引用Server的Queue）
+    
+    适用于单进程/多线程场景
+    """
+    
+    def __init__(self, server: LocalLearnerServer):
+        self._server = server
+        self._connected = False
+        self._last_weight_version = -1
+    
+    def connect(self) -> bool:
+        self._connected = True
+        return True
+    
+    def disconnect(self) -> None:
+        self._connected = False
+    
+    def send_transition(self, transition: Dict[str, Any]) -> None:
+        if not self._connected:
+            raise RuntimeError("Not connected to learner server")
+        self._server._get_transition_queue().put(transition)
+    
+    def send_transitions(self, transitions: List[Dict[str, Any]]) -> None:
+        for t in transitions:
+            self.send_transition(t)
+    
+    def recv_weights(self, block: bool = True, timeout: float = 10.0) -> Optional[Dict[str, torch.Tensor]]:
+        if not self._connected:
+            raise RuntimeError("Not connected to learner server")
+        
+        try:
+            if block:
+                data = self._server._get_weight_queue().get(timeout=timeout)
+            else:
+                data = self._server._get_weight_queue().get_nowait()
+            
+            if data["version"] > self._last_weight_version:
+                self._last_weight_version = data["version"]
+                return data["state_dict"]
+            return None
+        except Empty:
+            return None
+
+
+# ============ gRPC实现（用于分布式训练） ============
+
+class GRPCLearnerServer(LearnerServerInterface):
+    """
+    gRPC Learner服务器
+    
+    TODO: 完整实现需要定义protobuf消息
+    参考: LeRobot的gRPC实现
+    """
+    
+    def __init__(self, config: Optional[ActorLearnerConfig] = None):
+        self.config = config or ActorLearnerConfig()
+        self._running = False
+        # TODO: 初始化gRPC服务器
+        raise NotImplementedError("gRPC implementation requires protobuf definitions")
+    
+    def start(self) -> None:
+        raise NotImplementedError()
+    
+    def stop(self) -> None:
+        raise NotImplementedError()
+    
+    def recv_transitions(self, block: bool = False, timeout: float = 0.1) -> List[Dict[str, Any]]:
+        raise NotImplementedError()
+    
+    def publish_weights(self, state_dict: Dict[str, torch.Tensor], metadata: Optional[Dict] = None) -> None:
+        raise NotImplementedError()
+
+
+class GRPCActorClient(ActorClientInterface):
+    """
+    gRPC Actor客户端
+    
+    TODO: 完整实现需要定义protobuf消息
+    """
+    
+    def __init__(self, config: Optional[ActorLearnerConfig] = None):
+        self.config = config or ActorLearnerConfig()
+        self._connected = False
+        raise NotImplementedError("gRPC implementation requires protobuf definitions")
+    
+    def connect(self) -> bool:
+        raise NotImplementedError()
+    
+    def disconnect(self) -> None:
+        raise NotImplementedError()
+    
+    def send_transition(self, transition: Dict[str, Any]) -> None:
+        raise NotImplementedError()
+    
+    def send_transitions(self, transitions: List[Dict[str, Any]]) -> None:
+        raise NotImplementedError()
+    
+    def recv_weights(self, block: bool = True, timeout: float = 10.0) -> Optional[Dict[str, torch.Tensor]]:
+        raise NotImplementedError()
+
+
+# ============ 工厂函数 ============
+
+def create_learner_server(mode: str = "local", config: Optional[ActorLearnerConfig] = None) -> LearnerServerInterface:
+    """创建Learner服务器"""
+    if mode == "local":
+        return LocalLearnerServer(config)
+    elif mode == "grpc":
+        return GRPCLearnerServer(config)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+
+def create_actor_client(
+    mode: str = "local",
+    config: Optional[ActorLearnerConfig] = None,
+    server: Optional[LocalLearnerServer] = None,
+) -> ActorClientInterface:
+    """创建Actor客户端"""
+    if mode == "local":
+        if server is None:
+            raise ValueError("Local mode requires server instance")
+        return LocalActorClient(server)
+    elif mode == "grpc":
+        return GRPCActorClient(config)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")

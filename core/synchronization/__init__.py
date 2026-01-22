@@ -10,6 +10,7 @@ from .checkpoint_manager import CheckpointManager
 
 from .local import SharedMemorySync, QueueSync
 from .distributed import GRPCSync
+from .actor_learner import *
 
 __all__ = [
     "BaseSynchronizer",
