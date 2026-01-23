@@ -53,6 +53,9 @@ class SystemBuilder:
         Returns:
             构建好的系统组件
         """
+        # 提取全局 device 设置
+        global_device = config.get("device", "cuda")
+        
         # 1. 构建环境
         if "env" in config:
             self.components.env = self._build_env(config["env"])
@@ -66,14 +69,18 @@ class SystemBuilder:
         if "sampler" in config:
             self.components.sampler = self._build_sampler(config["sampler"])
         
-        # 4. 构建Policy
+        # 4. 构建Policy（全局 device 覆盖子配置 device）
         if "policy" in config:
-            self.components.policy = self._build_policy(config["policy"])
+            policy_config = dict(config["policy"])
+            policy_config["device"] = global_device  # 强制使用全局 device
+            self.components.policy = self._build_policy(policy_config)
         
-        # 5. 构建Algorithm
+        # 5. 构建Algorithm（全局 device 覆盖子配置 device）
         if "algorithm" in config:
+            algo_config = dict(config["algorithm"])
+            algo_config["device"] = global_device  # 强制使用全局 device
             self.components.algorithm = self._build_algorithm(
-                config["algorithm"],
+                algo_config,
                 self.components.policy
             )
         
@@ -85,36 +92,43 @@ class SystemBuilder:
     
     def _build_env(self, config: Dict[str, Any]) -> EnvInterface:
         """构建环境"""
+        config = dict(config)  # 复制避免修改原始配置
         env_type = config.pop("type")
         env_cls = self.registry.get("env", env_type)
         return env_cls(**config)
     
     def _build_buffer(self, config: Dict[str, Any]) -> BufferInterface:
         """构建Buffer"""
+        config = dict(config)
         buf_type = config.pop("type")
         buf_cls = self.registry.get("buffer", buf_type)
         return buf_cls(**config)
     
     def _build_sampler(self, config: Dict[str, Any]) -> SamplerInterface:
         """构建Sampler"""
+        config = dict(config)
         sampler_type = config.pop("type")
         sampler_cls = self.registry.get("sampler", sampler_type)
         return sampler_cls(**config)
     
     def _build_policy(self, config: Dict[str, Any]) -> PolicyInterface:
         """构建Policy"""
+        config = dict(config)
         policy_type = config.pop("type")
         policy_cls = self.registry.get("policy", policy_type)
-        return policy_cls(**config)
+        # Policy 接收完整 config 字典
+        return policy_cls(config)
     
     def _build_algorithm(self, config: Dict[str, Any], policy: PolicyInterface) -> AlgorithmInterface:
         """构建Algorithm"""
+        config = dict(config)
         algo_type = config.pop("type")
         algo_cls = self.registry.get("algorithm", algo_type)
-        return algo_cls(policy=policy, **config)
+        return algo_cls(policy=policy, config=config)
     
     def _build_sync(self, config: Dict[str, Any]) -> SyncInterface:
         """构建同步器"""
+        config = dict(config)
         sync_type = config.pop("type")
         sync_cls = self.registry.get("sync", sync_type)
         return sync_cls(**config)

@@ -6,9 +6,8 @@
 - rollout: policy实时推理的轨迹数据 (在线RL收集)
 - intervention: rollout过程中人类专家介入的数据 (在线纠正)
 """
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
-from common.types import Transition, Batch, Episode
 from data.samplers.base_sampler import BaseSampler
 from data.samplers.uniform_sampler import UniformSampler
 from data.samplers.hilserl_sampler import HILSERLSampler
@@ -58,29 +57,43 @@ class DataHub:
     def __init__(self, 
                  rollout_capacity: int = 100000,
                  intervention_capacity: int = 10000,
-                 intervention_save_path: Optional[str] = None):
+                 intervention_save_path: Optional[str] = None,
+                 intervention_save_interval: int = 100,
+                 load_intervention: bool = False):
         """
         Args:
             rollout_capacity: rollout buffer 容量
             intervention_capacity: intervention buffer 容量
             intervention_save_path: intervention 持久化路径
+            intervention_save_interval: intervention 异步保存间隔
+            load_intervention: 是否加载历史 intervention 数据
         """
         self._buffers: Dict[str, "BaseBuffer"] = {}
         self._samplers: Dict[str, BaseSampler] = {}
         self._default_sampler = "demo_only"
         
-        # 自动创建 rollout/intervention buffer（使用正确的本地实现签名）
+        # 自动创建 rollout/intervention buffer
         from data.buffers.replay_buffer import ReplayBuffer
         from data.buffers.intervention_buffer import InterventionBuffer
         self._buffers["rollout"] = ReplayBuffer(capacity=rollout_capacity)
-        self._buffers["intervention"] = InterventionBuffer(capacity=intervention_capacity)
+        self._buffers["intervention"] = InterventionBuffer(
+            capacity=intervention_capacity,
+            save_path=intervention_save_path,
+            save_interval=intervention_save_interval,
+        )
+        
+        # 加载历史 intervention 数据
+        if load_intervention and intervention_save_path:
+            loaded = self._buffers["intervention"].load()
+            if loaded > 0:
+                print(f"[DataHub] Loaded {loaded} historical intervention samples")
 
     @property
     def buffers(self) -> Dict[str, "BaseBuffer"]:
         """公开内部 buffers 字典（兼容 TrainingLoop 调用）。"""
         return self._buffers
 
-    def add(self, data: Union[Transition, Episode], source: str = "rollout"):
+    def add(self, data: Dict[str, Any], source: str = "rollout"):
         """向指定 buffer 写入数据（兼容旧 API 名称 add）。"""
         return self.write(data, source=source)
     
@@ -110,45 +123,26 @@ class DataHub:
     def intervention_buffer(self) -> Optional["BaseBuffer"]:
         return self._buffers.get("intervention")
     
-    def write(self, data: Union[Transition, Episode], source: str = "rollout"):
+    def write(self, data: Union[Dict[str, Any], List[Dict[str, Any]]], source: str = "rollout"):
         """
         写入数据
         
         Args:
-            data: Transition 或 Episode
+            data: transition dict 或 transitions 列表
             source: 目标 buffer 名称
         """
         buffer = self._buffers.get(source)
         if buffer is None:
             raise ValueError(f"Buffer '{source}' not registered")
         
-        # Accept both Episode/Transition dataclasses and plain dicts
-        if isinstance(data, Episode):
-            for t in data.transitions:
-                if isinstance(t, dict):
-                    buffer.add(t)
-                else:
-                    buffer.add({
-                        "obs": t.obs,
-                        "action": t.action,
-                        "reward": t.reward,
-                        "next_obs": t.next_obs,
-                        "done": t.done,
-                    })
+        # 支持单条或批量写入
+        if isinstance(data, list):
+            for t in data:
+                buffer.add(t)
         else:
-            # single transition: either dict or Transition dataclass
-            if isinstance(data, dict):
-                buffer.add(data)
-            else:
-                buffer.add({
-                    "obs": data.obs,
-                    "action": data.action,
-                    "reward": data.reward,
-                    "next_obs": data.next_obs,
-                    "done": data.done,
-                })
+            buffer.add(data)
     
-    def sample(self, batch_size: int, strategy: str = "demo_only", **kwargs) -> Batch:
+    def sample(self, batch_size: int, strategy: str = "demo_only", **kwargs) -> Dict[str, Any]:
         """
         采样数据
         
@@ -158,16 +152,14 @@ class DataHub:
             **kwargs: 传递给采样器的参数
             
         Returns:
-            训练 Batch
+            训练 batch (dict)
         """
         # 获取或创建采样器
         if strategy not in self._samplers:
             self._samplers[strategy] = create_sampler(strategy, **kwargs)
         
         sampler = self._samplers[strategy]
-        transitions = sampler.sample(self._buffers, batch_size)
-        
-        return Batch.from_transitions(transitions)
+        return sampler.sample(self._buffers, batch_size)
     
     def statistics(self) -> Dict[str, int]:
         """获取各 buffer 统计信息"""
@@ -176,7 +168,15 @@ class DataHub:
             stats[f"{name}_size"] = len(buffer)
             if hasattr(buffer, "num_episodes"):
                 stats[f"{name}_episodes"] = buffer.num_episodes
+            if hasattr(buffer, "total_saved"):
+                stats[f"{name}_saved"] = buffer.total_saved
         return stats
+    
+    def close(self):
+        """关闭 DataHub，保存所有未保存的 intervention 数据"""
+        intervention_buf = self._buffers.get("intervention")
+        if intervention_buf and hasattr(intervention_buf, "close"):
+            intervention_buf.close()
     
     def __repr__(self) -> str:
         stats = self.statistics()

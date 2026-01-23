@@ -1,16 +1,20 @@
 """
 HIL Actor Loop
 
-Human-in-the-Loop Actor 循环，与具体模型解耦
+Human-in-the-Loop Actor 循环，与具体模型和干预设备解耦
+
+设计原则：
+1. 干预设备检测由 Wrapper 负责（VRWrapper / SpaceMouseWrapper 等）
+2. Actor 只管调用 policy.act() 和 env.step()
+3. 通过 info 获取干预信息
+4. 模型通过 PolicyAdapter 接口接入
 
 负责:
 1. 在环境中执行策略
-2. 检测并处理人类干预
+2. 从 info 读取干预信息（由 Wrapper 提供）
 3. 使用奖励分类器预测奖励（可选）
 4. 发送 transitions 到 Learner
 5. 同步最新权重
-
-模型无关：通过 PolicyAdapter 接口接入任意模型
 """
 from typing import Dict, Any, Optional, Tuple, List, Union, Protocol
 from dataclasses import dataclass, field
@@ -47,10 +51,6 @@ class RewardClassifierProtocol(Protocol):
 @dataclass
 class HILActorConfig:
     """HIL Actor 配置"""
-    # 干预检测
-    intervention_key: str = "intervene_action"
-    intervention_source: str = "auto"  # "auto" | "gamepad" | "spacemouse" | "leader_arm"
-    
     # 奖励分类器
     use_reward_classifier: bool = False
     reward_classifier_threshold: float = 0.5
@@ -76,19 +76,26 @@ class HILActorLoop(BaseLoop):
     """
     Human-in-the-Loop Actor 循环
     
-    与模型解耦的设计：
-    - 通过 PolicyAdapter 接口接入任意模型（SAC、pi0、OpenVLA...）
-    - 模型只需实现 act() / get_weights() / load_weights()
+    设计特点：
+    1. 干预检测交给 Wrapper（VRWrapper/SpaceMouseWrapper）
+    2. Actor 始终调用 policy.act()，始终传给 env.step()
+    3. Wrapper 决定实际执行哪个动作，通过 info 返回
+    4. 模型通过 PolicyAdapter 解耦
     
     使用示例：
-        # 使用 SAC 策略
-        from core.interfaces.adapters import StandardPolicyAdapter
+        # 1. 用 Wrapper 包装环境
+        from env.wrappers import VRWrapper
+        base_env = H1RobotEnv()
+        env = VRWrapper(base_env, vr_device="quest")
+        
+        # 2. 创建 Actor
         adapter = StandardPolicyAdapter(sac_policy)
         actor = HILActorLoop(adapter, env, client, config)
         
-        # 使用 pi0.5（只同步 LoRA）
-        adapter = Pi0PolicyAdapter(pi0_model, sync_mode="lora")
-        actor = HILActorLoop(adapter, env, client, config)
+        # 3. 运行
+        while not done:
+            info = actor.step()
+            # Wrapper 已经处理了干预，info 中包含干预信息
     """
     
     def __init__(
@@ -159,7 +166,15 @@ class HILActorLoop(BaseLoop):
         print("[HIL-Actor] Skipped initial weight sync (using existing weights)")
     
     def step(self) -> Dict[str, Any]:
-        """执行单步 Actor 逻辑"""
+        """
+        执行单步 Actor 逻辑
+        
+        核心流程：
+        1. 总是调用 policy.act() 获取策略动作
+        2. 总是将策略动作传给 env.step()
+        3. Wrapper 在内部决定实际执行哪个动作
+        4. 从 info 读取干预信息
+        """
         # 0. 检查初始化
         if not self._initial_weights_synced:
             raise RuntimeError("Must call wait_for_initial_weights() or skip_initial_weights() first")
@@ -172,20 +187,26 @@ class HILActorLoop(BaseLoop):
         if self._current_obs is None:
             self._reset_episode()
         
-        # 3. 获取动作（人类干预优先）
-        action, is_intervention = self._get_action(self._current_obs, self._current_info)
+        # 3. 获取策略动作（始终调用策略）
+        policy_action = self.policy.act(self._current_obs, deterministic=self.config.deterministic)
+        policy_action = np.asarray(policy_action)
         
-        # 4. 执行动作
-        next_obs, env_reward, terminated, truncated, info = self.env.step(action)
+        # 4. 执行动作（传入策略动作，Wrapper 决定实际执行哪个）
+        next_obs, env_reward, terminated, truncated, info = self.env.step(policy_action)
         done = terminated or truncated or (self._episode_step >= self.config.max_episode_steps)
         
-        # 5. 计算奖励
+        # 5. 从 info 读取干预信息（由 Wrapper 提供）
+        is_intervention = info.get("is_intervention", False)
+        actual_action = info.get("intervene_action", policy_action) if is_intervention else policy_action
+        
+        # 6. 计算奖励
         reward = self._compute_reward(env_reward, self._current_obs, next_obs, info)
         
-        # 6. 构建并缓冲 transition
+        # 7. 构建并缓冲 transition
         transition = self._build_transition(
             obs=self._current_obs,
-            action=action,
+            action=actual_action,  # 使用实际执行的动作
+            policy_action=policy_action,  # 也保存策略动作（用于分析）
             reward=reward,
             next_obs=next_obs,
             done=done,
@@ -194,14 +215,14 @@ class HILActorLoop(BaseLoop):
         )
         self._buffer_transition(transition)
         
-        # 7. 更新统计
+        # 8. 更新统计
         self._episode_reward += reward
         self._episode_step += 1
         self._total_actions += 1
         if is_intervention:
             self._intervention_count += 1
         
-        # 8. 构建返回信息
+        # 9. 构建返回信息
         step_info = {
             "reward": reward,
             "done": done,
@@ -209,7 +230,7 @@ class HILActorLoop(BaseLoop):
             "episode_step": self._episode_step,
         }
         
-        # 9. Episode 结束处理
+        # 10. Episode 结束处理
         if done:
             step_info.update({
                 "episode_reward": self._episode_reward,
@@ -233,45 +254,6 @@ class HILActorLoop(BaseLoop):
         # 重置策略状态（对于有状态的策略）
         if hasattr(self.policy, 'reset'):
             self.policy.reset()
-    
-    def _get_action(self, obs: Dict[str, Any], info: Optional[Dict[str, Any]]) -> Tuple[np.ndarray, bool]:
-        """
-        获取动作（人类干预优先）
-        
-        Returns:
-            (action, is_intervention)
-        """
-        # 检查人类干预
-        intervention_action = self._check_intervention(info)
-        if intervention_action is not None:
-            return np.asarray(intervention_action), True
-        
-        # 使用策略
-        action = self.policy.act(obs, deterministic=self.config.deterministic)
-        return np.asarray(action), False
-    
-    def _check_intervention(self, info: Optional[Dict[str, Any]]) -> Optional[np.ndarray]:
-        """
-        检查是否有人类干预
-        
-        支持多种干预源检测
-        """
-        if info is None:
-            return None
-        
-        # 标准干预键
-        if self.config.intervention_key in info:
-            action = info[self.config.intervention_key]
-            if action is not None:
-                return action
-        
-        # 备选键（兼容不同环境）
-        alternative_keys = ["human_action", "teleop_action", "leader_action"]
-        for key in alternative_keys:
-            if key in info and info[key] is not None:
-                return info[key]
-        
-        return None
     
     def _compute_reward(
         self,
@@ -315,6 +297,7 @@ class HILActorLoop(BaseLoop):
         self,
         obs: Dict[str, Any],
         action: np.ndarray,
+        policy_action: np.ndarray,
         reward: float,
         next_obs: Dict[str, Any],
         done: bool,
@@ -325,6 +308,7 @@ class HILActorLoop(BaseLoop):
         return {
             "obs": self._extract_state(obs),
             "action": action,
+            "policy_action": policy_action,  # 策略原始输出
             "reward": reward,
             "next_obs": self._extract_state(next_obs),
             "done": done,

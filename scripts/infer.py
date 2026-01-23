@@ -1,6 +1,13 @@
 #!/usr/bin/env python
 """推理脚本"""
 import argparse
+import sys
+from pathlib import Path
+
+# 添加项目根目录到 Python 路径
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from utils import load_yaml
 from core.orchestration import SystemBuilder, REGISTRY
 from core.runtime import InferenceLoop

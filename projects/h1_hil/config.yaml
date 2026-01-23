@@ -1,0 +1,87 @@
+# H1 机器人 HIL 训练配置
+# 使用方式: python scripts/train_hil.py --config projects/h1_hil/config.yaml --mode local
+
+project_name: h1_hil
+log_dir: ./logs/h1_hil
+
+# 设备配置
+device: cuda
+
+# 环境配置
+env:
+  type: h1_robot
+  # H1 相机配置（头部 + 左右腕部）
+  camera_names:
+    - cam_high          # 头部相机
+    - cam_left_wrist    # 左腕相机
+    - cam_right_wrist   # 右腕相机
+  control_mode: position  # position or velocity
+  control_freq: 50  # Hz
+
+# 策略配置
+policy:
+  type: sac
+  hidden_dims: [256, 256]
+  activation: relu
+  use_layer_norm: true
+
+# 算法配置
+algorithm:
+  type: sac
+  gamma: 0.99
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  alpha_lr: 0.0003
+  init_alpha: 0.2
+  learnable_alpha: true
+
+# 数据缓冲区配置
+buffers:
+  rollout:
+    type: replay
+    capacity: 100000
+  intervention:
+    type: intervention
+    capacity: 50000
+  # demo:  # 可选：离线专家数据
+  #   type: hdf5_demo
+  #   path: data/demo/h1_demo.hdf5
+
+# 采样器配置
+sampler:
+  type: hilserl
+  demo_ratio: 0.25      # demo 数据占比
+  rollout_ratio: 0.25   # rollout 数据占比  
+  intervention_ratio: 0.5  # intervention 数据占比（更高权重）
+
+# HIL 特定配置
+hil:
+  enabled: true  # 启用 HIL 模式
+  mode: local    # local (单进程调试) / grpc (分布式)
+  
+  # 人工干预检测（H1 使用 VR 设备遥操作）
+  intervention:
+    type: vr_teleop  # vr_teleop / keyboard / joystick / force_sensor
+    # VR 动作从 env.step() 返回的 info["intervene_action"] 获取
+  
+  # 奖励分类器（可选，稀疏奖励任务需要）
+  reward_classifier:
+    checkpoint: null  # 预训练模型路径，null 表示不使用
+    threshold: 0.5
+    cameras:
+      - cam_high
+      - cam_left_wrist
+      - cam_right_wrist
+  
+  # 权重同步
+  sync:
+    sync_freq: 50  # 每 N 步同步一次
+
+# 训练配置
+training:
+  batch_size: 256
+  update_freq: 1  # 每 N 个 env step 更新一次
+  warmup_steps: 1000  # 预热步数（随机探索）
+  checkpoint_freq: 5000
+  log_freq: 100
