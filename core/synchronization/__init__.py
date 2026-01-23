@@ -10,9 +10,22 @@ from .checkpoint_manager import CheckpointManager
 
 from .local import SharedMemorySync, QueueSync
 from .distributed import GRPCSync
-from .actor_learner import *
+
+# Actor-Learner 通信层
+from .actor_learner import (
+    ActorLearnerConfig,
+    LearnerServerInterface,
+    ActorClientInterface,
+    LocalLearnerServer,
+    LocalActorClient,
+    GRPCLearnerServer,
+    GRPCActorClient,
+    create_learner_server,
+    create_actor_client,
+)
 
 __all__ = [
+    # 基础同步
     "BaseSynchronizer",
     "WeightPublisher",
     "WeightSubscriber",
@@ -22,4 +35,14 @@ __all__ = [
     "QueueSync",
     # Distributed
     "GRPCSync",
+    # Actor-Learner
+    "ActorLearnerConfig",
+    "LearnerServerInterface",
+    "ActorClientInterface",
+    "LocalLearnerServer",
+    "LocalActorClient",
+    "GRPCLearnerServer",
+    "GRPCActorClient",
+    "create_learner_server",
+    "create_actor_client",
 ]

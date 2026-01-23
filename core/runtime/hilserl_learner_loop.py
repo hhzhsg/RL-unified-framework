@@ -225,8 +225,17 @@ class HILSerlLearnerLoop(BaseLoop):
         """移动batch到训练设备"""
         result = {}
         for k, v in batch.items():
+            # numpy arrays with numeric dtype -> convert to torch
             if isinstance(v, np.ndarray):
-                result[k] = torch.from_numpy(v).float().to(self.device)
+                try:
+                    if np.issubdtype(v.dtype, np.number):
+                        result[k] = torch.from_numpy(v).float().to(self.device)
+                    else:
+                        # non-numeric arrays (e.g. strings) keep as-is
+                        result[k] = v
+                except Exception:
+                    # fallback: keep original if conversion fails
+                    result[k] = v
             elif isinstance(v, torch.Tensor):
                 result[k] = v.to(self.device)
             else:

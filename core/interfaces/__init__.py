@@ -12,6 +12,16 @@ from .transform_interface import TransformInterface, ComposableTransform, Revers
 from .algorithm_interface import AlgorithmInterface, OffPolicyAlgorithmInterface, OnPolicyAlgorithmInterface
 from .system_interface import SystemInterface, LoopInterface, SyncInterface, ComponentCapability
 
+# 策略适配器（用于解耦 HIL 和具体模型）
+from .policy_adapter import (
+    PolicyAdapter,
+    TrainablePolicyAdapter,
+    WeightSyncMode,
+    filter_weights_by_prefix,
+    filter_weights_by_keyword,
+)
+from .adapters import StandardPolicyAdapter, AlgorithmAdapter
+
 __all__ = [
     # Env
     "EnvInterface",
@@ -42,4 +52,12 @@ __all__ = [
     "LoopInterface",
     "SyncInterface",
     "ComponentCapability",
+    # Adapters
+    "PolicyAdapter",
+    "TrainablePolicyAdapter",
+    "WeightSyncMode",
+    "StandardPolicyAdapter",
+    "AlgorithmAdapter",
+    "filter_weights_by_prefix",
+    "filter_weights_by_keyword",
 ]
