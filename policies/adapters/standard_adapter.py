@@ -1,15 +1,21 @@
 """
-标准策略适配器实现
+标准策略适配器
 
 将框架内的 PolicyInterface 和 AlgorithmInterface 适配为 PolicyAdapter
+用于 HIL 训练中的 Actor/Learner 端
 """
 from typing import Dict, Any, Tuple, Optional
 import torch
 import numpy as np
 
-from .policy_adapter import PolicyAdapter, TrainablePolicyAdapter, WeightSyncMode
-from .policy_interface import PolicyInterface
-from .algorithm_interface import AlgorithmInterface
+from core.interfaces.policy_adapter import (
+    PolicyAdapter,
+    TrainablePolicyAdapter,
+    WeightSyncMode,
+    filter_weights_by_prefix,
+)
+from core.interfaces.policy_interface import PolicyInterface
+from core.interfaces.algorithm_interface import AlgorithmInterface
 
 
 class StandardPolicyAdapter(PolicyAdapter):
@@ -17,6 +23,13 @@ class StandardPolicyAdapter(PolicyAdapter):
     标准策略适配器
     
     封装 PolicyInterface，用于 Actor 端
+    
+    使用示例:
+        policy = SACPolicy(config)
+        adapter = StandardPolicyAdapter(policy)
+        
+        action = adapter.act(obs)
+        weights = adapter.get_weights()
     """
     
     def __init__(
@@ -44,7 +57,6 @@ class StandardPolicyAdapter(PolicyAdapter):
         if self.sync_mode == WeightSyncMode.FULL:
             return state_dict
         elif self.sync_mode == WeightSyncMode.CUSTOM:
-            from .policy_adapter import filter_weights_by_prefix
             return filter_weights_by_prefix(state_dict, self.sync_prefixes, include=True)
         else:
             # 其他模式暂时返回全量
@@ -64,7 +76,8 @@ class StandardPolicyAdapter(PolicyAdapter):
         return self.policy.device
     
     def reset(self) -> None:
-        self.policy.reset()
+        if hasattr(self.policy, 'reset'):
+            self.policy.reset()
 
 
 class AlgorithmAdapter(TrainablePolicyAdapter):
@@ -73,6 +86,13 @@ class AlgorithmAdapter(TrainablePolicyAdapter):
     
     封装 AlgorithmInterface，用于 Learner 端
     提供训练和权重同步功能
+    
+    使用示例:
+        algorithm = SACAlgorithm(policy, config)
+        adapter = AlgorithmAdapter(algorithm)
+        
+        metrics = adapter.update(batch)
+        weights = adapter.get_weights()
     """
     
     def __init__(
@@ -101,7 +121,6 @@ class AlgorithmAdapter(TrainablePolicyAdapter):
         if self.sync_mode == WeightSyncMode.FULL:
             return state_dict
         elif self.sync_mode == WeightSyncMode.CUSTOM:
-            from .policy_adapter import filter_weights_by_prefix
             return filter_weights_by_prefix(state_dict, self.sync_prefixes, include=True)
         else:
             return state_dict

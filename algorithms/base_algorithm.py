@@ -11,7 +11,11 @@ class BaseAlgorithm(AlgorithmInterface):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self._train_step = 0
-        self.device = torch.device(config.get("device", "cuda"))
+        # 自动检测设备，如果 CUDA 不可用则使用 CPU
+        device_str = config.get("device", "cuda")
+        if device_str == "cuda" and not torch.cuda.is_available():
+            device_str = "cpu"
+        self.device = torch.device(device_str)
     
     @property
     def train_step(self) -> int:

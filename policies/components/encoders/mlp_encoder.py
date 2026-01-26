@@ -3,8 +3,10 @@ from typing import List
 import torch
 import torch.nn as nn
 from core.interfaces import EncoderInterface
+from core.orchestration import register_policy
 
 
+@register_policy("mlp_encoder")
 class MLPEncoder(EncoderInterface):
     """MLP编码器"""
     

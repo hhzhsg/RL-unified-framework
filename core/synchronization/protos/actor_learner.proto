@@ -1,0 +1,73 @@
+// Actor-Learner 通信协议
+// 
+// 编译命令:
+//   python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. actor_learner.proto
+
+syntax = "proto3";
+
+package actorlearner;
+
+// ============ 消息定义 ============
+
+// Tensor 序列化（使用 bytes 传输）
+message TensorProto {
+    bytes data = 1;           // 序列化的 tensor 数据
+    repeated int64 shape = 2; // tensor 形状
+    string dtype = 3;         // 数据类型 (float32, float64, etc.)
+}
+
+// 单个 Transition
+message TransitionProto {
+    bytes obs = 1;            // 序列化的 obs (pickle)
+    bytes action = 2;         // 序列化的 action (numpy bytes)
+    bytes policy_action = 3;  // 策略输出的动作
+    float reward = 4;
+    bytes next_obs = 5;
+    bool done = 6;
+    bool is_intervention = 7;
+    string source = 8;        // "rollout" | "intervention"
+}
+
+// Transition 批次
+message TransitionBatch {
+    repeated TransitionProto transitions = 1;
+    int64 timestamp = 2;      // 发送时间戳
+}
+
+// 权重消息
+message WeightsProto {
+    map<string, TensorProto> state_dict = 1;  // 模型权重
+    int64 version = 2;                         // 权重版本号
+    int64 train_step = 3;                      // 训练步数
+    int64 timestamp = 4;                       // 时间戳
+}
+
+// 通用响应
+message StatusResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 权重请求
+message WeightRequest {
+    int64 last_version = 1;   // 客户端当前版本，用于增量更新
+}
+
+// 空请求
+message Empty {}
+
+// ============ 服务定义 ============
+
+service ActorLearnerService {
+    // Actor -> Learner: 发送 transitions
+    rpc SendTransitions(TransitionBatch) returns (StatusResponse);
+    
+    // Actor <- Learner: 获取最新权重
+    rpc GetWeights(WeightRequest) returns (WeightsProto);
+    
+    // Actor <- Learner: 轮询权重更新（返回是否有新版本）
+    rpc CheckWeightsUpdate(WeightRequest) returns (StatusResponse);
+    
+    // 健康检查
+    rpc HealthCheck(Empty) returns (StatusResponse);
+}

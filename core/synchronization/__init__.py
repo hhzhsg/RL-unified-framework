@@ -9,23 +9,26 @@ from .weight_subscriber import WeightSubscriber
 from .checkpoint_manager import CheckpointManager
 
 from .local import SharedMemorySync, QueueSync
-from .distributed import GRPCSync
 
-# Actor-Learner 通信层
+# Actor-Learner 通信层（推荐使用）
 from .actor_learner import (
     ActorLearnerConfig,
     LearnerServerInterface,
     ActorClientInterface,
     LocalLearnerServer,
     LocalActorClient,
-    GRPCLearnerServer,
-    GRPCActorClient,
     create_learner_server,
     create_actor_client,
 )
 
+# gRPC 实现（懒加载，避免未安装 grpcio 时报错）
+def get_grpc_classes():
+    """获取 gRPC 实现类"""
+    from .grpc_impl import GRPCLearnerServer, GRPCActorClient
+    return GRPCLearnerServer, GRPCActorClient
+
 __all__ = [
-    # 基础同步
+    # 基础同步（旧 API，兼容性保留）
     "BaseSynchronizer",
     "WeightPublisher",
     "WeightSubscriber",
@@ -33,16 +36,13 @@ __all__ = [
     # Local
     "SharedMemorySync",
     "QueueSync",
-    # Distributed
-    "GRPCSync",
-    # Actor-Learner
+    # Actor-Learner（推荐使用）
     "ActorLearnerConfig",
     "LearnerServerInterface",
     "ActorClientInterface",
     "LocalLearnerServer",
     "LocalActorClient",
-    "GRPCLearnerServer",
-    "GRPCActorClient",
+    "get_grpc_classes",  # 懒加载 gRPC 实现
     "create_learner_server",
     "create_actor_client",
 ]

@@ -1,5 +1,30 @@
 """
-H1机器人环境 - 预留接口
+H1机器人环境
+
+数据格式对齐 (与 data/demo/hdf5test/ 采集数据一致):
+
+状态 observation/state/ (共 65 维):
+  - arm/position:      14  (左右手臂关节角度, 各7个)
+  - arm/velocity:      14  (关节速度)
+  - arm/torque:        14  (关节力矩)
+  - base/velocity:      2  (底盘速度 vx, vy)
+  - effector/position:  2  (左右夹爪开合度)
+  - end/position:      14  (左右末端执行器位姿, 各7个)
+  - head/position:      2  (头部关节 pitch, yaw)
+  - waist/position:     3  (腰部: lift, waist_down, waist_up)
+
+动作 action/ (共 37 维):
+  - arm/position:      14
+  - base/velocity:      2
+  - effector/position:  2
+  - end/position:      14
+  - head/position:      2
+  - waist/position:     3
+
+图像 observation/images/ (3 个相机, 640x480 RGB JPEG):
+  - cam_high:        头部相机
+  - cam_left_wrist:  左腕相机
+  - cam_right_wrist: 右腕相机
 """
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
@@ -20,9 +45,13 @@ from lib_h1_sdk_python import (
 
 from .camera_sdk import ImageRecorder
 
+from zerocm import ZCM
+from idl.python.PolicyAction import PolicyAction
+
+
 @register_env("h1_robot")
 class H1RobotEnv(BaseEnv):
-    """H1机器人环境（预留实现）"""
+    """H1机器人环境"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -36,7 +65,7 @@ class H1RobotEnv(BaseEnv):
         self.control_mode = config.control_mode
 
         # TODO: need to change to match the sdk
-        self.sdk_cameras_name = ['cam_rs_0', 'cam_rs_1', 'cam_rs_2']
+        self.sdk_cameras_name = ['cam_high', 'cam_left_wrist', 'cam_right_wrist']
 
 
         self.T_l_init2base = np.array([[ 0.99595273,  0.,         -0.08987855,  0.39210682],
@@ -58,6 +87,14 @@ class H1RobotEnv(BaseEnv):
 
         self.robot = robot
 
+        self.operator_type = "policy"
+        self.done = False
+
+        self.zcm_node = ZCM("ipcshm")
+        self.zcm_node.start()
+        self.policy_action = PolicyAction()
+
+
         self.arm_motor_index =  \
               [eval(f'EtherCAT_Motor_Index.MOTOR_LEFT_ARM_{idx+1}') for idx in range(8)]  \
             + [eval(f'EtherCAT_Motor_Index.MOTOR_RIGHT_ARM_{idx+1}') for idx in range(8)]
@@ -77,25 +114,25 @@ class H1RobotEnv(BaseEnv):
         self.motor_num = len(self.motor_index)
 
 
-        max_retry = 10
-        conut = 0
-        while (conut < max_retry) and not robot.isRobotConnected():
-            try:
-                robot.robot_connect()
-            except:
-                print("connect failed, trying to connect again.")
-                time.sleep(1)
-                conut += 1
+        # max_retry = 10
+        # conut = 0
+        # while (conut < max_retry) and not robot.isRobotConnected():
+        #     try:
+        #         robot.robot_connect()
+        #     except:
+        #         print("connect failed, trying to connect again.")
+        #         time.sleep(1)
+        #         conut += 1
 
 
-        if not robot.switchControlMode(MotorControlMode.GRAVITY_COMPENSATION_LEVEL):
-            print("switch mode failed"); return
-        print("mode =", robot.getCurrentMode())
+        # if not robot.switchControlMode(MotorControlMode.GRAVITY_COMPENSATION_LEVEL):
+        #     print("switch mode failed"); return
+        # print("mode =", robot.getCurrentMode())
 
 
-        if not robot.robot_init():
-            print("robot_init failed"); return
-        print("robot initialized")
+        # if not robot.robot_init():
+        #     print("robot_init failed"); return
+        # print("robot initialized")
 
 
     @property
@@ -145,16 +182,27 @@ class H1RobotEnv(BaseEnv):
 
         origin_image_dict = self.image_recorder.get_images()
         repack_image_dict = {
-            self.camera_names[0]: origin_image_dict["cam_rs_0"],
-            self.camera_names[1]: origin_image_dict["cam_rs_1"],
-            self.camera_names[2]: origin_image_dict["cam_rs_2"],
+            self.camera_names[0]: origin_image_dict[self.camera_names[0]],
+            self.camera_names[1]: origin_image_dict[self.camera_names[1]],
+            self.camera_names[2]: origin_image_dict[self.camera_names[2]],
         }
         obs['images'] = repack_image_dict
         return obs
 
     def step(self, action: Any) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
         obs = self.get_observation()
-        self._set_joint_action(action)
+        # self._set_joint_action(action)
+
+        self.policy_action.operator_type = "policy"
+        self.policy_action.left_joint_action = action[:8]
+        self.policy_action.right_joint_action = action[8:16]
+        self.policy_action.waist = action[16:19]
+        self.policy_action.head = action[19:21]
+        self.policy_action.publiser_name = "va_agent"
+        self.policy_action.done = False
+        
+        self.zcm_node.publish("policy_action", self.policy_action)
+
         return obs
 
     def _set_joint_action(self, action):

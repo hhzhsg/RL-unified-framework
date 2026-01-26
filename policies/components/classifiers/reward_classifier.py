@@ -4,8 +4,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from policies.components.encoders.image_encoder import ImageEncoder
+from core.orchestration import register_policy
 
 
+@register_policy("reward_classifier")
 class RewardClassifier(nn.Module):
     """
     基于视觉的奖励分类器

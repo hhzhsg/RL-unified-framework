@@ -33,7 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils import load_yaml, Logger
 from core.orchestration import SystemBuilder, REGISTRY
-from core.runtime import TrainingLoop
+from core.runtime import LearnerLoop
 from data import DataHub
 from data.samplers import UniformSampler
 
@@ -56,7 +56,7 @@ def run_standard_training(components, config, args, logger):
     sampler = components.sampler or UniformSampler()
     
     # 创建训练循环
-    train_loop = TrainingLoop(
+    train_loop = LearnerLoop(
         algorithm=components.algorithm,
         data_hub=data_hub,
         sampler=sampler,
@@ -72,54 +72,111 @@ def run_standard_training(components, config, args, logger):
 
 
 def run_hil_training(components, config, args, logger):
-    """HIL 训练流程"""
-    from core.interfaces.adapters import StandardPolicyAdapter, AlgorithmAdapter
-    from core.runtime import HILTrainer
+    """HIL 分布式训练流程"""
+    from policies.adapters import StandardPolicyAdapter, AlgorithmAdapter
+    from core.runtime import HILActorLoop, HILActorConfig, HILLearnerLoop, HILLearnerConfig
+    from core.synchronization.actor_learner import ActorLearnerConfig
     
-    # 创建 Adapters
-    actor_adapter = StandardPolicyAdapter(components.algorithm.get_policy())
-    learner_adapter = AlgorithmAdapter(components.algorithm)
+    # 同步配置
+    sync_config = ActorLearnerConfig(**config.get("sync", {}))
+    hil_config = config.get("hil", {})
+    mode = hil_config.get("mode", "local")
     
-    # 加载 demo 数据（如果配置了）
-    demo_buffer = components.buffers.get("demo")
-    if demo_buffer:
-        logger.info(f"Loaded demo buffer with {len(demo_buffer)} samples")
+    if args.role == "learner":
+        # ===== Learner 进程 =====
+        logger.info("Starting HIL Learner...")
+        
+        learner_adapter = AlgorithmAdapter(components.algorithm)
+        learner_config = HILLearnerConfig(**hil_config.get("learner", {}))
+        
+        # 加载 demo 数据
+        demo_buffer = components.buffers.get("demo")
+        if demo_buffer:
+            logger.info(f"Loaded demo buffer: {len(demo_buffer)} samples")
+        
+        learner = HILLearnerLoop(
+            trainable_adapter=learner_adapter,
+            config=learner_config,
+            sync_config=sync_config,
+            demo_buffer=demo_buffer,
+            mode=mode,
+        )
+        
+        results = learner.run(args.steps, log_freq=config.get("log_freq", 100))
+        learner.cleanup()
+        
+    elif args.role == "actor":
+        # ===== Actor 进程 =====
+        logger.info("Starting HIL Actor...")
+        
+        # 获取基础环境
+        env = components.env
+        
+        # 根据配置添加 Wrapper
+        wrapper_config = hil_config.get("wrapper", {})
+        if wrapper_config.get("enabled", False):
+            wrapper_type = wrapper_config.get("type", "vr")
+            logger.info(f"Wrapping env with {wrapper_type} intervention wrapper")
+            env = _wrap_env_with_intervention(env, wrapper_type, wrapper_config)
+        
+        actor_adapter = StandardPolicyAdapter(components.algorithm.get_policy())
+        actor_config = HILActorConfig(**hil_config.get("actor", {}))
+        
+        # 加载 reward classifier
+        reward_classifier = None
+        classifier_path = hil_config.get("reward_classifier", {}).get("checkpoint")
+        if classifier_path:
+            logger.info(f"Loading reward classifier: {classifier_path}")
+            # TODO: 实现 classifier 加载
+        
+        actor = HILActorLoop(
+            policy_adapter=actor_adapter,
+            env=env,
+            config=actor_config,
+            sync_config=sync_config,
+            reward_classifier=reward_classifier,
+            mode=mode,
+        )
+        
+        results = actor.run(args.steps, log_freq=config.get("log_freq", 100))
+        actor.cleanup()
     
-    # 加载 reward classifier（如果配置了）
-    reward_classifier = None
-    classifier_config = config.get("hil", {}).get("reward_classifier", {})
-    classifier_path = classifier_config.get("checkpoint")
-    if classifier_path:
-        logger.info(f"Loading reward classifier from {classifier_path}")
-        # TODO: 实现 classifier 加载
-    
-    # 确定 HIL 模式
-    hil_mode = config.get("hil", {}).get("mode", "local")
-    if args.role:
-        hil_mode = "grpc"  # 指定 role 时自动切换到分布式
-    
-    # 创建 HILTrainer
-    trainer = HILTrainer(
-        actor_adapter=actor_adapter,
-        learner_adapter=learner_adapter,
-        env=components.env,
-        config=config,
-        demo_buffer=demo_buffer,
-        reward_classifier=reward_classifier,
-        mode=hil_mode,
-    )
-    
-    # 运行
-    if args.role:
-        # 分布式模式
-        logger.info(f"Starting distributed HIL training as {args.role}")
-        results = trainer.run_distributed(role=args.role, num_steps=args.steps)
     else:
-        # 本地模式
-        logger.info(f"Starting local HIL training for {args.steps} steps")
-        results = trainer.run_local(num_steps=args.steps, log_freq=config.get("log_freq", 100))
+        raise ValueError("HIL mode requires --role (learner or actor)")
     
     return results
+
+
+def _wrap_env_with_intervention(env, wrapper_type: str, wrapper_config: dict):
+    """
+    根据配置包装环境
+    
+    Config 示例:
+        hil:
+          wrapper:
+            enabled: true
+            type: vr  # vr | keyboard | mock
+            vr_device: quest
+            action_scale: 1.0
+    """
+    if wrapper_type == "vr":
+        from env.wrappers import VRWrapper
+        return VRWrapper(
+            env,
+            vr_device=wrapper_config.get("vr_device", "quest"),
+            action_scale=wrapper_config.get("action_scale", 1.0),
+            trigger_button=wrapper_config.get("trigger_button", "grip"),
+        )
+    elif wrapper_type == "keyboard":
+        # TODO: 实现键盘干预 wrapper
+        raise NotImplementedError("Keyboard wrapper not implemented")
+    elif wrapper_type == "mock":
+        # Mock wrapper 用于测试，随机触发干预
+        from env.wrappers import BaseInterventionWrapper
+        # 直接返回原 env，不做包装（测试用）
+        return env
+    else:
+        raise ValueError(f"Unknown wrapper type: {wrapper_type}")
 
 
 def main():

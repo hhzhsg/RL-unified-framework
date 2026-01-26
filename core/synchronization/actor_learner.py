@@ -212,57 +212,31 @@ class LocalActorClient(ActorClientInterface):
             return None
 
 
-# ============ gRPC实现占位（用于分布式训练） ============
+# ============ gRPC实现（用于分布式训练） ============
+# 完整实现在 grpc_impl.py，这里提供懒加载包装
 
-class GRPCLearnerServer(LearnerServerInterface):
-    """
-    gRPC Learner服务器
-    
-    TODO: 完整实现需要定义protobuf消息
-    """
-    
-    def __init__(self, config: Optional[ActorLearnerConfig] = None):
-        self.config = config or ActorLearnerConfig()
-        self._running = False
-    
-    def start(self) -> None:
-        raise NotImplementedError("gRPC implementation requires protobuf definitions")
-    
-    def stop(self) -> None:
-        raise NotImplementedError()
-    
-    def recv_transitions(self, block: bool = False, timeout: float = 0.1) -> List[Dict[str, Any]]:
-        raise NotImplementedError()
-    
-    def publish_weights(self, state_dict: Dict[str, torch.Tensor], metadata: Optional[Dict] = None) -> None:
-        raise NotImplementedError()
+def _get_grpc_server_class():
+    """懒加载 gRPC Server（避免未安装 grpcio 时报错）"""
+    try:
+        from .grpc_impl import GRPCLearnerServer
+        return GRPCLearnerServer
+    except ImportError as e:
+        raise ImportError(
+            f"gRPC implementation requires grpcio. Install with: pip install grpcio grpcio-tools\n"
+            f"Original error: {e}"
+        )
 
 
-class GRPCActorClient(ActorClientInterface):
-    """
-    gRPC Actor客户端
-    
-    TODO: 完整实现需要定义protobuf消息
-    """
-    
-    def __init__(self, config: Optional[ActorLearnerConfig] = None):
-        self.config = config or ActorLearnerConfig()
-        self._connected = False
-    
-    def connect(self) -> bool:
-        raise NotImplementedError("gRPC implementation requires protobuf definitions")
-    
-    def disconnect(self) -> None:
-        raise NotImplementedError()
-    
-    def send_transition(self, transition: Dict[str, Any]) -> None:
-        raise NotImplementedError()
-    
-    def send_transitions(self, transitions: List[Dict[str, Any]]) -> None:
-        raise NotImplementedError()
-    
-    def recv_weights(self, block: bool = True, timeout: float = 10.0) -> Optional[Dict[str, torch.Tensor]]:
-        raise NotImplementedError()
+def _get_grpc_client_class():
+    """懒加载 gRPC Client"""
+    try:
+        from .grpc_impl import GRPCActorClient
+        return GRPCActorClient
+    except ImportError as e:
+        raise ImportError(
+            f"gRPC implementation requires grpcio. Install with: pip install grpcio grpcio-tools\n"
+            f"Original error: {e}"
+        )
 
 
 # ============ 工厂函数 ============
@@ -272,6 +246,7 @@ def create_learner_server(mode: str = "local", config: Optional[ActorLearnerConf
     if mode == "local":
         return LocalLearnerServer(config)
     elif mode == "grpc":
+        GRPCLearnerServer = _get_grpc_server_class()
         return GRPCLearnerServer(config)
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -288,6 +263,7 @@ def create_actor_client(
             raise ValueError("Local mode requires server instance")
         return LocalActorClient(server)
     elif mode == "grpc":
+        GRPCActorClient = _get_grpc_client_class()
         return GRPCActorClient(config)
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -299,8 +275,6 @@ __all__ = [
     "ActorClientInterface",
     "LocalLearnerServer",
     "LocalActorClient",
-    "GRPCLearnerServer",
-    "GRPCActorClient",
     "create_learner_server",
     "create_actor_client",
 ]

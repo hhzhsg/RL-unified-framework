@@ -1,24 +1,49 @@
 """
-训练循环
+Learner Loop（适用于 Offline / Online RL，无人类干预）
 
-负责从Buffer采样数据，调用Algorithm更新
+业界标准命名：Actor-Learner 架构
+- Actor: 与环境交互，收集数据
+- Learner: 从数据学习，更新策略
+- Evaluator: 评估策略性能
+
+适用场景:
+- Offline RL: 从离线数据集训练
+- Online RL: 配合 ActorLoop 使用（ActorLoop 收集数据 → LearnerLoop 训练）
+
+与 HIL 的关系:
+- HIL 场景请使用 HILLearnerLoop，它额外负责:
+  - 接收 Actor 发送的 transitions
+  - 将 intervention 和 rollout 分流到不同 buffer
+  - 加权采样（intervention 2x）
+  - 发布权重到 Actor
+
+职责:
+- 从 DataHub 采样数据
+- 调用 Algorithm.update() 更新策略
+- 定期保存 checkpoint
+- 可选：同步权重到 Actor
 """
 from typing import Dict, Any, Optional
+import os
 import torch
 
 from .base_loop import BaseLoop
 from ..interfaces import AlgorithmInterface, SamplerInterface, SyncInterface
 
 
-class TrainingLoop(BaseLoop):
+class LearnerLoop(BaseLoop):
     """
-    训练循环
+    Learner Loop - 从数据学习
     
     职责:
-    - 从DataHub采样数据
-    - 调用Algorithm更新
-    - 同步权重到推理端
-    - 保存checkpoint
+    - 从 DataHub 采样数据
+    - 调用 Algorithm.update() 更新策略
+    - 同步权重到 Actor
+    - 保存 checkpoint
+    
+    使用示例:
+        learner = LearnerLoop(algorithm, data_hub, sampler, config, weight_sync)
+        learner.run(num_steps=100000)
     """
     
     def __init__(
@@ -47,8 +72,7 @@ class TrainingLoop(BaseLoop):
         self.checkpoint_dir = config.get("checkpoint_dir", "./checkpoints")
     
     def step(self) -> Dict[str, Any]:
-        """执行单步训练：先采样/更新，随后由本类递增步计数并在递增后执行同步与保存。"""
-
+        """执行单步学习"""
         # 1. 采样
         batch = self.sampler.sample(self.data_hub.buffers, self.batch_size)
         batch = self._to_device(batch)
@@ -56,14 +80,14 @@ class TrainingLoop(BaseLoop):
         # 2. 更新
         metrics = self.algorithm.update(batch)
 
-        # 3. 由 TrainingLoop 自行递增步计数（避免 BaseLoop 再次自增）
+        # 3. 递增步计数
         self._step_count += 1
 
-        # 4. 同步权重（基于已完成的步数）
+        # 4. 同步权重到 Actor
         if self.weight_sync and self._step_count % self.sync_freq == 0:
             self._sync_weights()
 
-        # 5. 保存 checkpoint（基于已完成的步数）
+        # 5. 保存 checkpoint
         if self._step_count % self.checkpoint_freq == 0:
             self._save_checkpoint(self._step_count)
 
@@ -80,7 +104,7 @@ class TrainingLoop(BaseLoop):
         return result
     
     def _sync_weights(self) -> None:
-        """同步权重"""
+        """同步权重到 Actor"""
         policy = self.algorithm.get_policy()
         state_dict = policy.state_dict()
         self.weight_sync.push(
@@ -89,10 +113,19 @@ class TrainingLoop(BaseLoop):
         )
     
     def _save_checkpoint(self, step: int | None = None) -> None:
-        """保存checkpoint。若提供 `step` 则使用该值作为文件名，否则使用当前计数。"""
-        import os
+        """保存 checkpoint"""
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         use_step = step if step is not None else self._step_count
         path = f"{self.checkpoint_dir}/step_{use_step}.pt"
         self.algorithm.save(path)
-        print(f"[Checkpoint] Saved to {path}")
+        print(f"[Learner] Checkpoint saved: {path}")
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """获取统计信息"""
+        return {
+            "train_steps": self._step_count,
+        }
+
+
+# 向后兼容别名
+TrainingLoop = LearnerLoop

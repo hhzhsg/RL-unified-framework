@@ -1,5 +1,27 @@
 """
 运行循环基类
+
+所有 Loop 的基类，提供:
+- step() 抽象方法
+- run() 循环执行
+- setup() / cleanup() 生命周期钩子
+- 停止机制（stop_event）
+- 回调机制（callbacks）
+- 步计数（step_count）
+
+Loop 继承关系（Actor-Learner-Evaluator 架构）:
+  BaseLoop
+  ├── ActorLoop         # Online RL 环境交互
+  ├── LearnerLoop       # Offline/Online RL 训练
+  ├── EvaluatorLoop     # 策略评估
+  ├── HILActorLoop      # HIL Actor（独立进程）
+  └── HILLearnerLoop    # HIL Learner（独立进程）
+
+场景选择:
+  - Offline RL: LearnerLoop
+  - Online RL: ActorLoop + LearnerLoop
+  - HIL: HILActorLoop + HILLearnerLoop（两个独立进程）
+  - 评估: EvaluatorLoop
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Callable

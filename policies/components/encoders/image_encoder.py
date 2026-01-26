@@ -3,8 +3,10 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from core.interfaces import ImageEncoderInterface
+from core.orchestration import register_policy
 
 
+@register_policy("image_encoder")
 class ImageEncoder(ImageEncoderInterface):
     """CNN图像编码器"""
     

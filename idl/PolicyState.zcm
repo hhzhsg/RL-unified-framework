@@ -1,0 +1,7 @@
+struct PolicyState
+{
+    string operator_type; // 传出当前接管状态, 'policy' or 'vr'
+    int32_t num_orders;
+    string order_list[num_orders];
+}
+

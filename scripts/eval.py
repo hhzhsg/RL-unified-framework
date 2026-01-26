@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""推理脚本"""
+"""策略评估脚本"""
 import argparse
 import sys
 from pathlib import Path
@@ -10,7 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils import load_yaml
 from core.orchestration import SystemBuilder, REGISTRY
-from core.runtime import InferenceLoop
+from core.runtime import EvaluatorLoop
 
 
 def main():
@@ -29,14 +29,14 @@ def main():
     components.algorithm.load(args.checkpoint)
     policy = components.algorithm.get_policy()
     
-    # 推理循环
-    infer_loop = InferenceLoop(
+    # 评估循环
+    evaluator = EvaluatorLoop(
         policy=policy,
         env=components.env,
-        config={"deterministic": True},
+        config={"render": False},
     )
     
-    results = infer_loop.evaluate(args.episodes)
+    results = evaluator.evaluate(args.episodes)
     print(f"Evaluation results: {results}")
 
 

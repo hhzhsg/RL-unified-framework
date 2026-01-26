@@ -2,11 +2,6 @@
 
 一个模块化、可扩展的强化学习框架，专注于真机 RL 和 Human-in-the-Loop 训练。
 
-## 更新历史
-
-- 2026-01-23: HIL-SERL 框架迁移，验证 Franka pick-and-place 60% 成功率
-- 2026-01-22: 初始版本，SAC/BC 算法实现
-
 ## 设计目标
 
 1. **模块自由组合**: Env/Buffer/Policy/Algorithm 可以任意搭配
@@ -17,15 +12,8 @@
 ## 环境安装
 
 ```bash
-# 克隆仓库
-git clone <repo_url>
-cd RL-unified-framework
-
 # 安装依赖
 pip install -r requirements.txt
-
-# （可选）安装开发依赖
-pip install -e .
 ```
 
 ## 目录结构
@@ -34,7 +22,7 @@ pip install -e .
 RL-unified-framework/
 ├── core/                    # 框架层（接口定义，禁止写具体算法）
 │   ├── interfaces/          # 抽象协议
-│   ├── runtime/             # 运行时循环（TrainingLoop, HILActorLoop等）
+│   ├── runtime/             # 运行时循环（Actor/Learner/Evaluator）
 │   ├── orchestration/       # 组件注册与系统组装
 │   └── synchronization/     # Actor-Learner 同步机制
 │
@@ -48,12 +36,27 @@ RL-unified-framework/
 │   ├── samplers/            # UniformSampler, HILSERLSampler
 │   └── transforms/          # 数据预处理
 ├── env/                     # 环境封装
+│   ├── dummy_env/           # 测试用虚拟环境
+│   ├── h1_robot/            # H1 机器人环境
+│   └── wrappers/            # 干预设备 Wrapper（VRWrapper等）
 ├── projects/                # 实验项目（隔离不同研究方向）
-├── configs/                 # 可复用配置
 ├── scripts/                 # 命令行入口
-├── utils/                   # 工具函数
-└── common/                  # 共享类型定义
+└── utils/                   # 工具函数
 ```
+
+## 模块职责速查
+
+| 目录 | 回答问题 | 示例 |
+|------|----------|------|
+| `core/runtime/` | **怎么跑**（Actor/Learner 循环） | `HILActorLoop`, `HILLearnerLoop` |
+| `core/synchronization/` | **怎么通信**（gRPC/Queue） | `LearnerServer`, `ActorClient` |
+| `env/wrappers/` | **怎么干预**（VR 接管检测） | `VRWrapper` |
+| `data/buffers/` | **数据存哪**（三类数据源） | `DemoBuffer`, `InterventionBuffer` |
+| `data/samplers/` | **怎么采样**（加权采样） | `HILSERLSampler`（intervention 2x） |
+| `algorithms/` | **怎么更新**（loss + 优化器） | `SACAlgorithm.update()` |
+| `policies/composed/` | **网络长什么样**（组合结构） | `SACPolicy` = Actor + Critic |
+| `policies/components/` | **网络怎么实现**（原子模块） | `GaussianActor`, `QCritic` |
+| `policies/adapters/` | **怎么统一接口**（适配不同模型） | `StandardPolicyAdapter`, `Pi0Adapter` |
 
 ## 使用方式
 
@@ -61,27 +64,38 @@ RL-unified-framework/
 
 ```bash
 # 使用配置文件训练
-python scripts/train.py --config projects/_template/config.yaml --steps 100000
+python scripts/train.py --config projects/_template/config.yaml --steps 10000
 
-# 推理
-python scripts/infer.py --checkpoint checkpoints/step_50000.pt
+# 评估
+python scripts/eval.py --config projects/_template/config.yaml --checkpoint checkpoints/step_10000.pt
 ```
 
 ### HIL 训练（Human-in-the-Loop）
 
-```python
-from core.runtime import HILTrainer
-from core.interfaces.adapters import StandardPolicyAdapter
+HIL 使用分布式 Actor-Learner 架构：
 
-# 本地调试模式
-trainer = HILTrainer(
-    actor_adapter=StandardPolicyAdapter(policy),
-    learner_adapter=AlgorithmAdapter(algorithm),
+```bash
+# 终端 1：启动 Learner（GPU 服务器）
+python scripts/train.py --config projects/h1_hil/config.yaml --role learner
+
+# 终端 2：启动 Actor（机器人端）
+python scripts/train.py --config projects/h1_hil/config.yaml --role actor
+```
+
+```python
+# 或者代码中直接使用
+from core.runtime import HILActorLoop, HILLearnerLoop
+from core.synchronization import create_actor_client, create_learner_server
+
+# Actor 端
+actor = HILActorLoop(
+    policy_adapter=adapter,
     env=env,
-    config=config,
-    mode="local",
+    config=actor_config,
+    sync_config=sync_config,
+    mode="grpc",
 )
-results = trainer.run_local(num_steps=10000)
+actor.run(num_steps=10000)
 ```
 
 ### 添加新算法
@@ -107,6 +121,24 @@ class MyAlgorithm(BaseOffPolicyAlgorithm):
 | `PolicyInterface` | 策略接口（act, forward） |
 | `AlgorithmInterface` | 算法接口（update, save, load） |
 | `PolicyAdapter` | 策略适配器（解耦 HIL 与具体模型） |
+
+## 运行时循环（Actor-Learner-Evaluator 架构）
+
+采用业界标准的 Actor-Learner 分离架构：
+
+| Loop | 职责 | 适用场景 |
+|------|------|---------|
+| `ActorLoop` | 环境交互，收集数据 | Online RL |
+| `LearnerLoop` | 从数据学习，更新策略 | Offline/Online RL |
+| `EvaluatorLoop` | 评估策略性能 | 策略评估 |
+| `HILActorLoop` | 带人类干预的 Actor | HIL 训练 |
+| `HILLearnerLoop` | 带数据分流的 Learner | HIL 训练 |
+
+场景选择：
+- **Offline RL**: `LearnerLoop`
+- **Online RL**: `ActorLoop` + `LearnerLoop`
+- **HIL**: `HILActorLoop` + `HILLearnerLoop`
+- **评估**: `EvaluatorLoop`
 
 ## 架构特点
 

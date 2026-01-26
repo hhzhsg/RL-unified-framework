@@ -13,7 +13,7 @@ class BCAlgorithm(BaseAlgorithm):
     def __init__(self, policy, config: Dict[str, Any]):
         super().__init__(config)
         self.policy = policy.to(self.device)
-        self.lr = config.get("lr", 3e-4)
+        self.lr = config.get("learning_rate", config.get("lr", 3e-4))
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
     
     def update(self, batch: Dict[str, Any]) -> Dict[str, float]:

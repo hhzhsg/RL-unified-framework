@@ -1,0 +1,11 @@
+struct PolicyAction
+{
+    string operator_type;  // 用于异常要求人类接管
+    double left_joint_action[8];  // the last joint for gripper
+    double right_joint_action[8];
+    double waist[3]; 
+    double head[2];
+    string publiser_name;  // 发布端
+    boolean done;  // 是否成功抓取
+}
+

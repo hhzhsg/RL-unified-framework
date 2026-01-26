@@ -1,5 +1,6 @@
 from .base_buffer import BaseBuffer
 from .replay_buffer import ReplayBuffer
-from .offline_dataset import OfflineDataset
+from .demo_buffer import DemoBuffer
 from .intervention_buffer import InterventionBuffer
-__all__ = ["BaseBuffer", "ReplayBuffer", "OfflineDataset", "InterventionBuffer"]
+
+__all__ = ["BaseBuffer", "ReplayBuffer", "DemoBuffer", "InterventionBuffer"]
