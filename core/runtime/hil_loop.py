@@ -70,10 +70,15 @@ class HILActorConfig:
     weight_sync_freq: int = 1
     transition_batch_size: int = 1
     require_initial_weights: bool = True
-    # 奖励分类器
+    # 奖励分类器（通过 project 的 reward_config.py 配置）
     use_reward_classifier: bool = False
-    reward_classifier_threshold: float = 0.5
-    camera_keys: List[str] = field(default_factory=lambda: ["images.front", "images.side"])
+    project_dir: Optional[str] = None  # 项目目录，用于加载 reward_config.py
+    # 以下参数会被 reward_config.py 中的 CLASSIFIER_CONFIG 覆盖
+    reward_classifier_threshold: float = 0.8
+    reward_classifier_checkpoint: Optional[str] = None
+    camera_keys: List[str] = field(default_factory=lambda: ["cam_high", "cam_left_wrist", "cam_right_wrist"])
+    # done 判定
+    classifier_determines_done: bool = True  # classifier 预测成功时是否终止 episode
 
 
 @dataclass
@@ -93,6 +98,124 @@ class HILLearnerConfig:
     # Buffer 容量
     rollout_buffer_capacity: int = 100000
     intervention_buffer_capacity: int = 50000
+    # Buffer 持久化路径
+    rollout_save_path: Optional[str] = None
+    intervention_save_path: Optional[str] = None
+    rollout_save_interval: int = 1000
+    intervention_save_interval: int = 500
+
+
+# ============ 辅助函数 ============
+
+def load_demo_buffer(
+    demo_path: str,
+    buffer_class: Optional[type] = None,
+) -> Optional["BufferProtocol"]:
+    """
+    加载 Demo Buffer（支持 Pickle 格式）
+    
+    Args:
+        demo_path: Demo 文件路径 (.pkl)
+        buffer_class: Buffer 类（默认使用 ReplayBuffer）
+        
+    Returns:
+        加载好的 Buffer 实例，或 None（如果加载失败）
+        
+    示例:
+        demo_buffer = load_demo_buffer("data/demo/expert_demos.pkl")
+        learner = HILLearnerLoop(..., demo_buffer=demo_buffer)
+    """
+    if not demo_path or not os.path.exists(demo_path):
+        print(f"[HIL] Demo path not found: {demo_path}")
+        return None
+    
+    try:
+        from data.buffers.replay_buffer import ReplayBuffer
+        
+        if buffer_class is None:
+            buffer_class = ReplayBuffer
+        
+        # 创建 buffer 并加载数据
+        buffer = buffer_class(capacity=100000)  # 容量足够大
+        buffer.load(demo_path)
+        
+        print(f"[HIL] Loaded demo buffer from {demo_path}, size={len(buffer)}")
+        return buffer
+    except Exception as e:
+        print(f"[HIL] Failed to load demo buffer: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def load_reward_config(project_dir: str) -> Optional[Any]:
+    """
+    加载项目的 reward_config.py 模块
+    
+    Args:
+        project_dir: 项目目录路径（包含 reward_config.py）
+        
+    Returns:
+        reward_config 模块，包含 CLASSIFIER_CONFIG 和 reward_func
+        
+    示例:
+        reward_config = load_reward_config("projects/h1_task")
+        classifier_cfg = reward_config.CLASSIFIER_CONFIG
+        success = reward_config.reward_func(obs, classifier_prob)
+    """
+    if not project_dir:
+        print("[HIL] No project_dir specified, using default reward config")
+        return None
+    
+    reward_config_path = os.path.join(project_dir, "reward_config.py")
+    if not os.path.exists(reward_config_path):
+        print(f"[HIL] reward_config.py not found in {project_dir}")
+        return None
+    
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("reward_config", reward_config_path)
+        reward_config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reward_config)
+        print(f"[HIL] Loaded reward_config from {reward_config_path}")
+        return reward_config
+    except Exception as e:
+        print(f"[HIL] Failed to load reward_config: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def load_reward_classifier(
+    checkpoint_path: str,
+    config: Dict[str, Any],
+    device: str = "cuda",
+) -> Optional[Any]:
+    """
+    加载奖励分类器
+    
+    Args:
+        checkpoint_path: 权重文件路径
+        config: 分类器配置（num_cameras, input_shape 等）
+        device: 设备
+        
+    Returns:
+        RewardClassifier 实例，或 None（如果加载失败）
+    """
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        print(f"[HIL] Classifier checkpoint not found: {checkpoint_path}")
+        return None
+    
+    try:
+        from policies.components.classifiers.reward_classifier import RewardClassifier
+        classifier = RewardClassifier.load_pretrained(checkpoint_path, config)
+        classifier.to(device)
+        classifier.eval()
+        print(f"[HIL] Loaded reward classifier from {checkpoint_path}")
+        return classifier
+    except Exception as e:
+        print(f"[HIL] Failed to load classifier: {e}")
+        return None
 
 
 # ============ HIL Actor Loop ============
@@ -135,6 +258,23 @@ class HILActorLoop(BaseLoop):
         self.env = env
         self.config = config
         self.reward_classifier = reward_classifier
+        
+        # 加载 project 的 reward_config.py
+        self.reward_config = None
+        self.reward_func = None
+        if config.use_reward_classifier and config.project_dir:
+            self.reward_config = load_reward_config(config.project_dir)
+            if self.reward_config is not None:
+                self.reward_func = getattr(self.reward_config, 'reward_func', None)
+                # 用 reward_config 中的配置覆盖 config 的默认值
+                classifier_cfg = getattr(self.reward_config, 'CLASSIFIER_CONFIG', {})
+                if 'threshold' in classifier_cfg:
+                    self.config.reward_classifier_threshold = classifier_cfg['threshold']
+                if 'checkpoint' in classifier_cfg:
+                    self.config.reward_classifier_checkpoint = classifier_cfg['checkpoint']
+                if 'cameras' in classifier_cfg:
+                    self.config.camera_keys = classifier_cfg['cameras']
+                print(f"[HIL-Actor] Using reward_config: threshold={self.config.reward_classifier_threshold}")
         
         # 创建或使用注入的通信客户端
         if actor_client is not None:
@@ -209,23 +349,31 @@ class HILActorLoop(BaseLoop):
         
         # 执行（Wrapper 决定实际动作）
         next_obs, env_reward, terminated, truncated, info = self.env.step(policy_action)
-        done = terminated or truncated or (self._episode_step >= self.config.max_episode_steps)
         
         # 从 info 读取干预信息
         is_intervention = info.get("is_intervention", False)
         actual_action = info.get("intervene_action", policy_action) if is_intervention else policy_action
         
-        # 计算奖励
-        reward = self._compute_reward(env_reward, next_obs, info)
+        # 计算奖励（可由 classifier 覆盖）
+        reward, classifier_success = self._compute_reward(env_reward, next_obs, info)
         
-        # 构建 transition
+        # done 判定：env终止 or 截断 or 超时 or classifier判定成功
+        classifier_done = classifier_success and self.config.classifier_determines_done
+        done = terminated or truncated or (self._episode_step >= self.config.max_episode_steps) or classifier_done
+        
+        # 记录成功信息
+        info["classifier_success"] = classifier_success
+        
+        # 构建 transition（对齐 HIL-SERL 格式）
         transition = {
-            "obs": self._extract_state(self._current_obs),
-            "action": actual_action,
+            "observations": self._current_obs,  # 完整 obs dict {"qpos": ..., "images": ...}
+            "actions": actual_action,
+            "next_observations": next_obs,
+            "rewards": reward,
+            "masks": 1.0 - float(done),  # HIL-SERL: masks = 1 - done
+            "dones": done,
+            # 额外字段（用于分析/调试）
             "policy_action": policy_action,
-            "reward": reward,
-            "next_obs": self._extract_state(next_obs),
-            "done": done,
             "is_intervention": is_intervention,
             "source": "intervention" if is_intervention else "rollout",
         }
@@ -245,6 +393,7 @@ class HILActorLoop(BaseLoop):
             "reward": reward,
             "done": done,
             "is_intervention": is_intervention,
+            "classifier_success": classifier_success,
         }
         
         if done:
@@ -252,6 +401,7 @@ class HILActorLoop(BaseLoop):
                 "episode_reward": self._episode_reward,
                 "episode_length": self._episode_step,
                 "intervention_rate": self._intervention_count / max(self._total_actions, 1),
+                "success": classifier_success,  # episode 是否成功
             })
             self._episode_count += 1
             self._reset_episode()
@@ -269,12 +419,84 @@ class HILActorLoop(BaseLoop):
         if hasattr(self.policy, 'reset'):
             self.policy.reset()
     
-    def _compute_reward(self, env_reward: float, next_obs: Dict, info: Dict) -> float:
-        """计算奖励（可使用分类器）"""
+    def _compute_reward(self, env_reward: float, next_obs: Dict, info: Dict) -> tuple:
+        """
+        计算奖励（使用 project 的 reward_config.py 中定义的复合条件）
+        
+        流程：
+        1. 用 classifier 计算成功概率
+        2. 调用 reward_func(obs, classifier_prob) 判断是否成功
+        
+        Returns:
+            (reward, classifier_success): 奖励值和是否成功
+        """
         if not self.config.use_reward_classifier or self.reward_classifier is None:
-            return env_reward
-        # TODO: 实现奖励分类器
-        return env_reward
+            return env_reward, False
+        
+        # 从 obs 中提取图像
+        images = self._extract_classifier_images(next_obs)
+        if images is None:
+            return env_reward, False
+        
+        # 分类器预测概率
+        with torch.no_grad():
+            classifier_prob = self.reward_classifier.predict_proba(images)
+            classifier_prob = float(classifier_prob.item())
+        
+        # 使用 reward_func 判断成功（复合条件）
+        if self.reward_func is not None:
+            # 调用 project 定义的 reward_func(obs, classifier_prob)
+            classifier_success = bool(self.reward_func(next_obs, classifier_prob))
+        else:
+            # 默认：只用 classifier 阈值
+            classifier_success = classifier_prob > self.config.reward_classifier_threshold
+        
+        reward = 1.0 if classifier_success else env_reward
+        
+        if classifier_success:
+            print(f"[HIL-Actor] SUCCESS! classifier_prob={classifier_prob:.3f}")
+        
+        return reward, classifier_success
+    
+    def _extract_classifier_images(self, obs: Dict) -> Optional[List[torch.Tensor]]:
+        """
+        从 obs 中提取分类器需要的图像
+        
+        Args:
+            obs: 观测字典，包含 "images" 键
+            
+        Returns:
+            图像列表 [Tensor(1,C,H,W), ...] 或 None
+        """
+        images_data = obs.get("images", None)
+        if images_data is None:
+            return None
+        
+        images = []
+        
+        # 处理 torch.Tensor 格式 (num_cam, C, H, W)
+        if isinstance(images_data, torch.Tensor):
+            for i in range(images_data.shape[0]):
+                img = images_data[i:i+1]  # (1, C, H, W)
+                if img.device.type != 'cuda' and torch.cuda.is_available():
+                    img = img.cuda()
+                images.append(img)
+            return images
+        
+        # 处理 Dict[str, np.ndarray] 格式
+        if isinstance(images_data, dict):
+            for cam_key in self.config.camera_keys:
+                if cam_key in images_data:
+                    img = images_data[cam_key]
+                    if isinstance(img, np.ndarray):
+                        # (H, W, C) -> (1, C, H, W)
+                        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+                        if torch.cuda.is_available():
+                            img = img.cuda()
+                    images.append(img)
+            return images if images else None
+        
+        return None
     
     def _extract_state(self, obs) -> np.ndarray:
         """提取状态向量"""
@@ -362,12 +584,20 @@ class HILLearnerLoop(BaseLoop):
                 sync_config = ActorLearnerConfig()
             self.server = create_learner_server(mode, sync_config)
         
-        # 初始化 Buffer
+        # 初始化 Buffer（支持持久化）
         from data.buffers.replay_buffer import ReplayBuffer
         from data.buffers.intervention_buffer import InterventionBuffer
         
-        self.rollout_buffer = ReplayBuffer(capacity=config.rollout_buffer_capacity)
-        self.intervention_buffer = InterventionBuffer(capacity=config.intervention_buffer_capacity)
+        self.rollout_buffer = ReplayBuffer(
+            capacity=config.rollout_buffer_capacity,
+            save_path=config.rollout_save_path,
+            save_interval=config.rollout_save_interval,
+        )
+        self.intervention_buffer = InterventionBuffer(
+            capacity=config.intervention_buffer_capacity,
+            save_path=config.intervention_save_path,
+            save_interval=config.intervention_save_interval,
+        )
         self.demo_buffer = demo_buffer
         
         # 采样器
@@ -484,16 +714,69 @@ class HILLearnerLoop(BaseLoop):
         if not buffers:
             return None
         
+        # 调试：打印 buffer 状态
+        if self._step_count % 100 == 0:
+            buffer_info = f"rollout={len(self.rollout_buffer)}, intervention={len(self.intervention_buffer)}"
+            print(f"[HIL-Learner] Buffers: {buffer_info}, total_received={self._transitions_received}, interventions_received={self._interventions_received}")
+        
         try:
-            return self.sampler.sample(buffers, self.config.batch_size)
+            batch = self.sampler.sample(buffers, self.config.batch_size)
+            # 调试：打印采样结果
+            if self._step_count % 100 == 0 and batch:
+                sources = batch.get('source', [])
+                if hasattr(sources, '__len__'):
+                    from collections import Counter
+                    source_counts = Counter(sources)
+                    sample_info = ", ".join([f"{k}={v}" for k, v in source_counts.items()])
+                    print(f"[HIL-Learner] Sampled: {sample_info}")
+            return batch
         except ValueError:
             return None
     
     def _to_device(self, batch: Dict) -> Dict:
-        """移动到设备"""
+        """
+        移动到设备并标准化字段名
+        
+        HIL transition 格式 → 算法期望格式:
+        - observations → obs
+        - actions → action
+        - next_observations → next_obs
+        - rewards → reward
+        - dones → done
+        """
+        # 字段名映射（HIL-SERL → 算法标准格式）
+        field_mapping = {
+            "observations": "obs",
+            "actions": "action",
+            "next_observations": "next_obs",
+            "rewards": "reward",
+            "dones": "done",
+        }
+        
         result = {}
         for k, v in batch.items():
-            if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number):
+            # 映射字段名
+            key = field_mapping.get(k, k)
+            
+            # 处理嵌套 dict (如 observations: {"qpos": ..., "images": ...})
+            if isinstance(v, dict):
+                result[key] = self._nested_to_device(v)
+            elif isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number):
+                result[key] = torch.from_numpy(v).float().to(self.device)
+            elif isinstance(v, torch.Tensor):
+                result[key] = v.to(self.device)
+            else:
+                result[key] = v
+        
+        return result
+    
+    def _nested_to_device(self, data: Dict) -> Dict:
+        """递归将嵌套 dict 移动到设备"""
+        result = {}
+        for k, v in data.items():
+            if isinstance(v, dict):
+                result[k] = self._nested_to_device(v)
+            elif isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number):
                 result[k] = torch.from_numpy(v).float().to(self.device)
             elif isinstance(v, torch.Tensor):
                 result[k] = v.to(self.device)
@@ -517,8 +800,19 @@ class HILLearnerLoop(BaseLoop):
         return len(self.rollout_buffer) + len(self.intervention_buffer)
     
     def cleanup(self) -> None:
-        """清理"""
+        """清理：保存 buffer 并关闭服务器"""
+        # 强制保存未保存的 buffer 数据
+        if hasattr(self.rollout_buffer, 'flush'):
+            self.rollout_buffer.flush()
+        if hasattr(self.intervention_buffer, 'flush'):
+            self.intervention_buffer.flush()
+        if hasattr(self.rollout_buffer, 'close'):
+            self.rollout_buffer.close()
+        if hasattr(self.intervention_buffer, 'close'):
+            self.intervention_buffer.close()
+        
         self.server.stop()
+        print("[HIL-Learner] Cleanup complete, buffers saved.")
     
     def get_statistics(self) -> Dict[str, Any]:
         return {

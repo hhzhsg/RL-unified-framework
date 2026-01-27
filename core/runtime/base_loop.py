@@ -65,7 +65,7 @@ class BaseLoop(ABC):
         total_metrics = {}
         start_time = time.time()
         
-        for _ in range(num_steps):
+        while True:
             if self._stop_event.is_set():
                 break
             
@@ -88,6 +88,10 @@ class BaseLoop(ABC):
             
             # 回调
             self._trigger_callbacks("on_step", step_info)
+            
+            # 控制频率（可配置）
+            step_interval = getattr(self, '_step_interval', 0.1)  # 默认100ms
+            time.sleep(step_interval)
         
         self._is_running = False
         

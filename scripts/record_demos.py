@@ -6,22 +6,25 @@ Demo 采集脚本（基于 Classifier 自动判定成功）
 这个流程同时验证了 Classifier 的准确性。
 
 流程（参考 HIL-SERL record_demos.py）：
-1. 加载预训练的 Classifier
-2. 人类通过 VR 遥操作执行任务
-3. Classifier 自动判定每帧是否成功
-4. Episode 结束时，如果成功则保存整条轨迹
-5. 达到目标成功轨迹数后保存数据
+1. 加载 project 的 reward_config.py（包含 CLASSIFIER_CONFIG 和 reward_func）
+2. 加载 Classifier 并构建环境
+3. 人类通过 VR 遥操作执行任务
+4. 每帧使用 reward_func(obs, classifier_prob) 判断是否成功
+5. Episode 结束时，如果 succeed 则保存整条轨迹
+
+reward_config.py 定义：
+- CLASSIFIER_CONFIG: classifier 配置（checkpoint, cameras, threshold）
+- reward_func(obs, classifier_prob): 复合条件判断函数
 
 使用示例:
-    # 采集 20 条成功 demo
+    # 采集 20 条成功 demo（使用 project 的 reward_config.py）
     python scripts/record_demos.py \
-        --config projects/h1_hil/config.yaml \
-        --classifier checkpoints/h1_classifier.pt \
+        --project_dir projects/h1_task \
         --successes 20
     
     # 使用 DummyEnv 测试（随机 success）
     python scripts/record_demos.py \
-        --config projects/_template/config.yaml \
+        --project_dir projects/_template \
         --successes 5 \
         --test_mode
 """
@@ -84,15 +87,19 @@ class ClassifierWrapper:
     
     def predict_success(self, obs: Dict[str, Any]) -> bool:
         """预测当前观测是否为成功状态"""
+        return self.predict_proba(obs) > self.threshold
+    
+    def predict_proba(self, obs: Dict[str, Any]) -> float:
+        """预测成功概率"""
         images = self._extract_and_preprocess_images(obs)
         if images is None:
-            return False
+            return 0.0
         
         with torch.no_grad():
             # 模型期望 List[Tensor]，每个 Tensor 是一个相机的 batch
             images_list = [img.unsqueeze(0).to(self.device) for img in images]
-            probs = self.model.predict_reward(images_list, threshold=self.threshold)
-            return probs.item() > 0.5
+            probs = self.model.predict_proba(images_list)
+            return float(probs.item())
     
     def _extract_and_preprocess_images(self, obs: Dict) -> Optional[List[torch.Tensor]]:
         """从观测中提取并预处理图像"""
@@ -154,32 +161,61 @@ def build_transition(
 
 def main():
     parser = argparse.ArgumentParser(description="Record Demos (Classifier-based success detection)")
-    parser.add_argument("--config", type=str, required=True, help="Config file path")
-    parser.add_argument("--classifier", type=str, default=None,
-                        help="Classifier checkpoint path (required unless --test_mode)")
+    parser.add_argument("--project_dir", type=str, required=True,
+                        help="Project directory (contains config.yaml and reward_config.py)")
     parser.add_argument("--successes", type=int, default=20,
                         help="Number of successful demos to collect")
-    parser.add_argument("--output_dir", type=str, default="./demo_data",
-                        help="Output directory for demo data")
-    parser.add_argument("--cameras", type=str, nargs="+",
-                        default=["cam_high", "cam_left_wrist", "cam_right_wrist"],
-                        help="Camera names for classifier")
-    parser.add_argument("--threshold", type=float, default=0.5,
-                        help="Classifier success threshold")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Output directory (default: {project_dir}/demo_data)")
+    
     parser.add_argument("--device", type=str, default="cuda", help="Device")
     parser.add_argument("--test_mode", action="store_true",
                         help="Test mode: random success (no classifier)")
     parser.add_argument("--test_success_prob", type=float, default=0.1,
-                        help="Success probability per episode in test mode")
+                        help="Success probability per step in test mode")
     args = parser.parse_args()
     
-    # 校验参数
-    if not args.test_mode and args.classifier is None:
-        parser.error("--classifier is required unless using --test_mode")
+    # 设置默认输出目录
+    if args.output_dir is None:
+        args.output_dir = os.path.join(args.project_dir, "demo_data")
     
     # 加载配置
-    config = load_yaml(args.config)
+    config_path = os.path.join(args.project_dir, "config.yaml")
+    if not os.path.exists(config_path):
+        print(f"Error: config.yaml not found in {args.project_dir}")
+        return
+    config = load_yaml(config_path)
     logger = Logger(log_dir="./logs")
+    
+    # 加载 reward_config.py
+    reward_config = None
+    reward_func = None
+    classifier = None
+    
+    if not args.test_mode:
+        from core.runtime.hil_loop import load_reward_config
+        reward_config = load_reward_config(args.project_dir)
+        
+        if reward_config is None:
+            logger.error(f"reward_config.py not found in {args.project_dir}")
+            logger.error("Please create reward_config.py or use --test_mode")
+            return
+        
+        reward_func = getattr(reward_config, 'reward_func', None)
+        classifier_cfg = getattr(reward_config, 'CLASSIFIER_CONFIG', {})
+        
+        # 加载 classifier
+        checkpoint_path = classifier_cfg.get("checkpoint")
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            classifier = ClassifierWrapper(
+                checkpoint_path=checkpoint_path,
+                camera_keys=classifier_cfg.get("cameras", ["cam_high"]),
+                threshold=classifier_cfg.get("threshold", 0.8),
+                device=args.device,
+            )
+        else:
+            logger.warning(f"Classifier checkpoint not found: {checkpoint_path}")
+            logger.warning("Will use reward_func with classifier_prob=0")
     
     # 构建环境
     from core.orchestration.component_registry import REGISTRY
@@ -188,21 +224,12 @@ def main():
     env_cls = REGISTRY.get("env", env_type)
     robot_env = env_cls(env_config)
     
-    # 加载 Classifier
-    classifier = None
-    if not args.test_mode:
-        classifier = ClassifierWrapper(
-            checkpoint_path=args.classifier,
-            camera_keys=args.cameras,
-            threshold=args.threshold,
-            device=args.device,
-        )
-    
-    exp_name = config.get("project_name", "unknown")
+    exp_name = config.get("project_name", os.path.basename(args.project_dir))
     logger.info(f"Recording demos for: {exp_name}")
     logger.info(f"Target successes: {args.successes}")
     if classifier:
-        logger.info(f"Classifier: {args.classifier}")
+        logger.info(f"Classifier: {classifier_cfg.get('checkpoint')}")
+        logger.info(f"Threshold: {classifier_cfg.get('threshold', 0.8)}")
     
     # 采集循环
     all_transitions = []
@@ -229,6 +256,29 @@ def main():
             if "intervene_action" in info:
                 action = info["intervene_action"]
             
+            # === 计算 classifier_prob 和 succeed ===
+            classifier_prob = 0.0
+            if classifier is not None:
+                classifier_prob = classifier.predict_proba(next_obs)
+            
+            if args.test_mode:
+                # 测试模式：随机判定
+                succeed = np.random.random() < args.test_success_prob
+            elif reward_func is not None:
+                # 使用 project 的 reward_func（复合条件）
+                succeed = reward_func(next_obs, classifier_prob)
+            else:
+                # fallback: 只用 classifier 阈值
+                succeed = classifier_prob > 0.8
+            
+            # 更新 reward（如果成功则覆盖）
+            if succeed:
+                reward = 1.0
+                done = True  # 成功时终止 episode
+            
+            info["succeed"] = succeed
+            info["classifier_prob"] = classifier_prob
+            
             # 构建 transition
             transition = build_transition(
                 obs=obs,
@@ -239,14 +289,6 @@ def main():
                 info=info,
             )
             trajectory.append(transition)
-            
-            # 使用 Classifier 预测成功（添加到 info 中）
-            if classifier:
-                succeed = classifier.predict_success(next_obs)
-                info["succeed"] = succeed
-            elif args.test_mode:
-                # 测试模式：episode 结束时随机判定
-                info["succeed"] = done and (np.random.random() < args.test_success_prob)
             
             # 更新进度条
             pbar.set_description(f"Return: {episode_return:.2f}")

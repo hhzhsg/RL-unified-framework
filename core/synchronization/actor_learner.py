@@ -16,7 +16,7 @@ import torch
 class ActorLearnerConfig:
     """Actor-Learner 配置"""
     learner_host: str = "localhost"
-    learner_port: int = 50051
+    learner_port: int = 50060
     weight_poll_interval: float = 0.1  # 秒
     policy_push_frequency: int = 100   # 训练步数
     transition_batch_size: int = 10    # 每次发送的transition数量

@@ -30,7 +30,7 @@ projects/h1_hil/
 ```bash
 # 终端 1 - Learner（先启动）
 cd ~/rl_code/zerith/RL-unified-framework/projects/h1_hil
-python test_real_loop.py --role learner --mode grpc --port 50051 --device cpu
+python test_real_loop.py --role learner --mode grpc --port 50060 --device cpu
 
 # 终端 2 - Actor
 python test_real_loop.py --role actor --mode grpc --learner-host localhost

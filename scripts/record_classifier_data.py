@@ -171,15 +171,27 @@ def main():
     config = load_yaml(args.config)
     logger = Logger(log_dir="./logs")
     
+    # 获取环境配置
+    env_config = dict(config.get("env", {}))
+    env_type = env_config.pop("type", "dummy")
+    
+    # 相机配置（优先使用配置文件中的）
+    camera_names = env_config.get("camera_names", args.cameras)
+    # 如果命令行指定了相机，覆盖配置
+    if args.cameras != ["cam_high", "cam_left_wrist", "cam_right_wrist"]:
+        camera_names = args.cameras
+    
+    # Classifier 采集必须启用相机
+    if not env_config.get("use_camera", False):
+        logger.warning("Classifier data requires camera! Enabling use_camera=True")
+        env_config["use_camera"] = True
+    
     # 构建环境
     from core.orchestration.component_registry import REGISTRY
-    env_config = dict(config["env"])
-    env_type = env_config.pop("type")
     env_cls = REGISTRY.get("env", env_type)
+    if env_cls is None:
+        raise ValueError(f"Unknown env type: {env_type}")
     robot_env = env_cls(env_config)
-    
-    # 获取相机名称（优先使用配置中的）
-    camera_names = config.get("env", {}).get("camera_names", args.cameras)
     
     logger.info(f"Recording classifier data for: {config.get('project_name', 'unknown')}")
     logger.info(f"Target successes: {args.successes}")

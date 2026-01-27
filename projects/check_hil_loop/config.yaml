@@ -69,7 +69,7 @@ hil:
 # === 通信配置 ===
 sync:
   host: localhost      # Learner 地址（改成 GPU 服务器 IP）
-  port: 50051
+  port: 50060
   heartbeat_interval: 5.0
   timeout: 30.0
 

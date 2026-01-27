@@ -1,0 +1,90 @@
+      
+# H1 实机 HIL 测试配置
+# 用于 H1 机器人 Actor-Learner 分布式训练测试
+
+# === 环境配置 ===
+env:
+  type: h1_robot
+  control_mode: position
+  # ZCM 通信
+  zcm_url: ipcshm              # 本地: ipcshm, 跨机器: udpm://239.255.76.67:7667
+  # IDL 配置
+  idl_module: idl_python
+  idl_python_paths:
+    # - /home/charles/Teleop_whole_body_sim/teleop/scripts
+    - /home/robot/Teleop_whole_body_sim/teleop/scripts
+  # 相机（需要相机服务运行）
+  use_camera: true
+  camera_grpc_target: localhost:50051
+  camera_names:
+    - v4l2/cam_high
+    - v4l2/cam_right_wrist
+  split_stereo: true           # 双目分割
+  # 调试
+  dry_run: false               # true: 只读观测，不下发动作
+
+# === 策略配置 ===
+policy:
+  type: echo                   # echo: qpos→action (安全), mlp: 三层MLP (测试训练)
+  # 规范维度:
+  # state_dim = 37: arm(14) + arm_vel(14) + gripper(2) + waist(3) + head(2) + base(2)
+  # action_dim = 23: arm(14) + gripper(2) + waist(3) + head(2) + base(2)
+  state_dim: 37
+  action_dim: 23
+  hidden_dim: 256              # MLP 隐藏层维度
+  device: cpu
+
+# === 算法配置 ===
+algorithm:
+  type: bc                     # 测试用 BC，后续换成 hil_serl
+  lr: 0.0003                   # 学习率
+  device: cpu                  # 训练设备 (cpu/cuda)
+
+# === Buffer 配置 ===
+buffers:
+  demo:
+    type: demo
+    data_path: data/demo/hdf5test
+  rollout:
+    capacity: 100000
+  intervention:
+    capacity: 50000
+
+# === HIL 配置 ===
+hil:
+  enabled: true
+  mode: grpc                   # 分布式模式
+
+  # Actor 端
+  actor:
+    deterministic: false
+    max_episode_steps: 500
+    weight_sync_freq: 10       # 每 10 步检查权重更新
+    transition_batch_size: 1
+    require_initial_weights: true
+
+  # Learner 端
+  learner:
+    batch_size: 64
+    utd_ratio: 1
+    training_starts: 50        # 调低方便调试
+    policy_push_frequency: 50
+    checkpoint_freq: 200
+    checkpoint_dir: ./checkpoints/h1_hil
+    # 采样权重
+    demo_weight: 1.0
+    rollout_weight: 1.0
+    intervention_weight: 2.0
+
+# === 通信配置 ===
+sync:
+  host: localhost              # Learner 地址（实机时改成 GPU 服务器 IP）
+  port: 50060                  # Actor-Learner gRPC 端口
+
+# === 日志配置 ===
+logging:
+  log_dir: ./logs/h1_hil
+  log_freq: 10
+  save_transitions: false      # 是否保存 transitions 到文件
+
+    

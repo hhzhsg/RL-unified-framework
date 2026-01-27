@@ -48,8 +48,8 @@ class DummyEnv(BaseEnv):
         
         self._state = None
 
-        self.zcm_node = ZCM("udp://192.168.2.145:7667")
-        self.zcm_node.subscribe('chassis_state', PolicyState, self._polcy_state_handler)
+        self.zcm_node = ZCM("udp://192.168.2.145:9000:9001?ttl=5")
+        self.zcm_node.subscribe('policy_state', PolicyState, self._polcy_state_handler)
         self.zcm_node.start()
         self.policy_action = PolicyAction()
         self.policy_state = PolicyState()
@@ -113,6 +113,7 @@ class DummyEnv(BaseEnv):
         self.policy_action.done = False
         
         self.zcm_node.publish("policy_action", self.policy_action)
+        print("publish")
 
 
         return obs, float(reward), terminated, truncated, info

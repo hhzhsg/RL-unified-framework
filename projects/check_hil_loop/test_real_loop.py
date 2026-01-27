@@ -7,7 +7,7 @@
 
 使用方式:
     # 终端 1 - Learner（先启动）
-    python test_real_loop.py --role learner --mode grpc --port 50051 --device cpu
+    python test_real_loop.py --role learner --mode grpc --port 50060 --device cpu
     
     # 终端 2 - Actor
     python test_real_loop.py --role actor --mode grpc --learner-host localhost
@@ -156,8 +156,8 @@ def main():
     
     # 网络
     parser.add_argument("--learner-host", type=str, default="localhost")
-    parser.add_argument("--learner-port", type=int, default=50051)
-    parser.add_argument("--port", type=int, default=50051)
+    parser.add_argument("--learner-port", type=int, default=50060)
+    parser.add_argument("--port", type=int, default=50060)
     
     # 模型
     parser.add_argument("--state-dim", type=int, default=37)
@@ -171,7 +171,7 @@ def main():
     parser.add_argument("--training-starts", type=int, default=50, help="开始训练前收集的 transitions 数量")
     parser.add_argument("--weight-push-freq", type=int, default=50)
     parser.add_argument("--checkpoint-freq", type=int, default=200)
-    parser.add_argument("--checkpoint-dir", type=str, default="/home/charles/rl_code/zerith/RL-unified-framework/checkpoints/check_hil_loop")
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/check_hil_loop")
     
     # 环境
     parser.add_argument("--intervention-prob", type=float, default=0.2)

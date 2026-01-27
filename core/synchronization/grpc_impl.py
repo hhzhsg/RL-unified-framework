@@ -106,7 +106,15 @@ def deserialize_transition(data: Dict[str, Any]) -> Dict[str, Any]:
 
 # ============ gRPC Servicer（服务端逻辑） ============
 
-class ActorLearnerServicer:
+# 延迟导入 pb2_grpc 用于继承
+try:
+    from .protos import actor_learner_pb2_grpc
+    _GRPC_SERVICER_BASE = actor_learner_pb2_grpc.ActorLearnerServiceServicer
+except ImportError:
+    _GRPC_SERVICER_BASE = object
+
+
+class ActorLearnerServicer(_GRPC_SERVICER_BASE):
     """gRPC 服务端实现"""
     
     def __init__(self):

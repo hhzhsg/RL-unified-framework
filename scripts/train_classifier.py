@@ -2,33 +2,44 @@
 """
 Reward Classifier 训练脚本
 
-从采集的成功/失败数据中训练二分类器。
-支持两种数据格式：
-1. HIL-SERL 格式：record_classifier_data.py 生成的 pickle 文件
-2. HDF5 格式：从 demo 数据中提取成功帧
+参考 HIL-SERL 实现：
+- 使用预训练 ResNet-18（ImageNet）作为图像编码器
+- 冻结 backbone，只训练 pooling + 分类头
+- 支持多相机图像拼接
+- Random Crop 数据增强
+
+注意：Classifier 需要人工标注的 success/failure 数据，不支持从 HDF5 demo 自动提取。
+请使用 record_classifier_data.py 采集标注数据。
 
 使用示例:
-    # 使用 pickle 数据训练（HIL-SERL 格式）
+    # 方式 1: 指定数据目录（自动匹配 success/failure 文件）
+    python scripts/train_classifier.py \
+        --data_dir classifier_data/ \
+        --output checkpoints/classifier.pt
+    
+    # 方式 2: 手动指定文件
     python scripts/train_classifier.py \
         --success_data classifier_data/h1_200_success.pkl \
         --failure_data classifier_data/h1_failure.pkl \
         --output checkpoints/classifier.pt
-    
-    # 使用 HDF5 demo 数据训练
+        
+    # 指定相机和预训练模型
     python scripts/train_classifier.py \
-        --demo data/demo/h1_demo.hdf5 \
-        --output checkpoints/classifier.pt \
-        --success_frames 5
+        --data_dir classifier_data/ \
+        --cameras cam_high cam_left_wrist cam_right_wrist \
+        --encoder resnet18 \
+        --freeze_encoder
 """
 import argparse
 import sys
-import h5py
+import glob
 import pickle as pkl
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -39,52 +50,202 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from utils import Logger
 
 
-class RewardClassifier(nn.Module):
+# ============ 数据加载辅助函数 ============
+
+def find_classifier_data(data_dir: str) -> Tuple[List[str], List[str]]:
     """
-    基于图像的奖励分类器
+    从目录中自动匹配 success/failure 数据文件
     
-    输入：多个相机图像（拼接后）
-    输出：成功概率 [0, 1]
+    Args:
+        data_dir: 数据目录
+        
+    Returns:
+        (success_files, failure_files): 匹配到的文件列表
+    """
+    data_dir = Path(data_dir)
     
-    架构：简单 CNN + MLP（可替换为更复杂的 ViT 等）
+    # 查找所有 pkl 文件
+    all_files = list(data_dir.glob("*.pkl"))
+    
+    success_files = [str(f) for f in all_files if "success" in f.name.lower()]
+    failure_files = [str(f) for f in all_files if "failure" in f.name.lower() or "fail" in f.name.lower()]
+    
+    return sorted(success_files), sorted(failure_files)
+
+
+def load_pickle_data(file_paths: List[str]) -> List[Dict]:
+    """加载多个 pickle 文件并合并"""
+    all_data = []
+    for path in file_paths:
+        with open(path, "rb") as f:
+            data = pkl.load(f)
+            all_data.extend(data)
+        print(f"[Data] Loaded {len(data)} samples from {path}")
+    return all_data
+
+
+# ============ 预训练 ResNet Encoder ============
+
+class PretrainedResNetEncoder(nn.Module):
+    """
+    预训练 ResNet 编码器（参考 HIL-SERL）
+    
+    使用 ImageNet 预训练权重，支持冻结 backbone
     """
     
     def __init__(
         self,
-        image_channels: int = 3,
-        image_size: Tuple[int, int] = (84, 84),
+        model_name: str = "resnet18",
+        freeze: bool = True,
+        pretrained: bool = True,
+    ):
+        super().__init__()
+        
+        # 加载预训练模型
+        if model_name == "resnet10":
+            # ResNet-10 需要自定义（HIL-SERL 使用）
+            # 这里用 ResNet-18 的前几层近似
+            resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT if pretrained else None)
+            self.encoder = nn.Sequential(
+                resnet.conv1,
+                resnet.bn1,
+                resnet.relu,
+                resnet.maxpool,
+                resnet.layer1,
+                resnet.layer2,
+            )
+            self.out_channels = 128
+            self.out_size = 28  # 对于 224x224 输入
+        elif model_name == "resnet18":
+            resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT if pretrained else None)
+            self.encoder = nn.Sequential(*list(resnet.children())[:-2])  # 去掉 avgpool 和 fc
+            self.out_channels = 512
+            self.out_size = 7  # 对于 224x224 输入
+        elif model_name == "resnet34":
+            resnet = models.resnet34(weights=models.ResNet34_Weights.DEFAULT if pretrained else None)
+            self.encoder = nn.Sequential(*list(resnet.children())[:-2])
+            self.out_channels = 512
+            self.out_size = 7
+        elif model_name == "resnet50":
+            resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT if pretrained else None)
+            self.encoder = nn.Sequential(*list(resnet.children())[:-2])
+            self.out_channels = 2048
+            self.out_size = 7
+        else:
+            raise ValueError(f"Unknown model: {model_name}")
+        
+        # 冻结 backbone（HIL-SERL 默认冻结）
+        if freeze:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, C, H, W) 图像
+        Returns:
+            features: (B, C', H', W') 特征图
+        """
+        return self.encoder(x)
+
+
+class SpatialLearnedEmbeddings(nn.Module):
+    """
+    Spatial Learned Embeddings（参考 HIL-SERL）
+    
+    学习空间位置的特征表示，比 avg pooling 保留更多空间信息
+    """
+    
+    def __init__(self, height: int, width: int, channels: int, num_features: int = 8):
+        super().__init__()
+        self.height = height
+        self.width = width
+        self.channels = channels
+        self.num_features = num_features
+        
+        # 学习的空间嵌入
+        self.embeddings = nn.Parameter(
+            torch.randn(num_features, height, width) * 0.01
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, C, H, W)
+        Returns:
+            (B, C * num_features)
+        """
+        B, C, H, W = x.shape
+        
+        # Softmax over spatial dimensions
+        weights = self.embeddings.view(self.num_features, -1)
+        weights = F.softmax(weights, dim=-1)
+        weights = weights.view(self.num_features, self.height, self.width)
+        
+        # 加权求和
+        features = []
+        for i in range(self.num_features):
+            # (B, C, H, W) * (H, W) -> (B, C)
+            feat = (x * weights[i].unsqueeze(0).unsqueeze(0)).sum(dim=(-2, -1))
+            features.append(feat)
+        
+        # Concatenate
+        return torch.cat(features, dim=-1)  # (B, C * num_features)
+
+
+class RewardClassifier(nn.Module):
+    """
+    基于预训练 ResNet 的奖励分类器（参考 HIL-SERL）
+    
+    架构：
+    - 预训练 ResNet encoder（冻结）
+    - Spatial Learned Embeddings pooling
+    - MLP 分类头
+    
+    多相机：每个相机独立编码，然后拼接特征
+    """
+    
+    def __init__(
+        self,
         num_cameras: int = 2,
+        encoder_name: str = "resnet18",
+        freeze_encoder: bool = True,
+        pretrained: bool = True,
         hidden_dim: int = 256,
+        num_spatial_blocks: int = 8,
+        dropout: float = 0.1,
     ):
         super().__init__()
         
         self.num_cameras = num_cameras
-        self.image_size = image_size
         
-        # 每个相机的 encoder（共享权重）
-        self.encoder = nn.Sequential(
-            nn.Conv2d(image_channels, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
+        # 共享的预训练编码器
+        self.encoder = PretrainedResNetEncoder(
+            model_name=encoder_name,
+            freeze=freeze_encoder,
+            pretrained=pretrained,
         )
         
-        # 计算 encoder 输出维度
-        with torch.no_grad():
-            dummy = torch.zeros(1, image_channels, *image_size)
-            encoder_out_dim = self.encoder(dummy).shape[1]
+        # 每个相机的 Spatial Learned Embeddings（不共享）
+        self.spatial_embeddings = nn.ModuleList([
+            SpatialLearnedEmbeddings(
+                height=self.encoder.out_size,
+                width=self.encoder.out_size,
+                channels=self.encoder.out_channels,
+                num_features=num_spatial_blocks,
+            )
+            for _ in range(num_cameras)
+        ])
+        
+        # 特征维度
+        feature_dim = self.encoder.out_channels * num_spatial_blocks * num_cameras
         
         # 分类头
         self.classifier = nn.Sequential(
-            nn.Linear(encoder_out_dim * num_cameras, hidden_dim),
+            nn.Linear(feature_dim, hidden_dim),
+            nn.Dropout(dropout),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
             nn.Linear(hidden_dim, 1),
         )
     
@@ -97,10 +258,14 @@ class RewardClassifier(nn.Module):
             logits: (B, 1) success logits
         """
         features = []
-        for img in images:
-            feat = self.encoder(img)
+        for i, img in enumerate(images):
+            # 编码
+            feat = self.encoder(img)  # (B, C', H', W')
+            # Spatial pooling
+            feat = self.spatial_embeddings[i](feat)  # (B, C' * num_blocks)
             features.append(feat)
         
+        # 拼接所有相机特征
         combined = torch.cat(features, dim=-1)
         logits = self.classifier(combined)
         return logits
@@ -110,16 +275,7 @@ class RewardClassifier(nn.Module):
         images: List[torch.Tensor],
         threshold: float = 0.5,
     ) -> torch.Tensor:
-        """
-        预测奖励（二值化）
-        
-        Args:
-            images: List of image tensors
-            threshold: 成功阈值
-            
-        Returns:
-            rewards: (B,) 0 或 1
-        """
+        """预测奖励（二值化）"""
         with torch.no_grad():
             logits = self.forward(images)
             probs = torch.sigmoid(logits).squeeze(-1)
@@ -132,32 +288,94 @@ class RewardClassifier(nn.Module):
             logits = self.forward(images)
             probs = torch.sigmoid(logits).squeeze(-1)
         return probs
+    
+    @classmethod
+    def load_pretrained(cls, path: str, config: Dict = None) -> "RewardClassifier":
+        """加载预训练模型"""
+        checkpoint = torch.load(path, map_location="cpu")
+        
+        # 从 checkpoint 获取配置
+        saved_config = checkpoint.get("config", {})
+        if config:
+            saved_config.update(config)
+        
+        model = cls(
+            num_cameras=saved_config.get("num_cameras", 2),
+            encoder_name=saved_config.get("encoder", "resnet18"),
+            freeze_encoder=True,  # 推理时总是冻结
+            pretrained=False,  # 不需要重新加载预训练权重
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        return model
+
+
+# ============ 数据增强（参考 HIL-SERL）============
+
+def get_train_transforms(image_size: int = 224, crop_padding: int = 4):
+    """训练时的数据增强"""
+    return transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((image_size + crop_padding * 2, image_size + crop_padding * 2)),
+        transforms.RandomCrop(image_size),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],  # ImageNet mean
+            std=[0.229, 0.224, 0.225],   # ImageNet std
+        ),
+    ])
+
+
+def get_eval_transforms(image_size: int = 224):
+    """评估时的数据变换（无增强）"""
+    return transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ),
+    ])
 
 
 class PickleClassifierDataset(Dataset):
     """
     从 pickle 文件加载的 Classifier 数据集（HIL-SERL 格式）
     
-    数据格式（由 record_classifier_data.py 生成）：
-    - success_data.pkl: List of transitions，每个包含 observations (images dict)
-    - failure_data.pkl: List of transitions，每个包含 observations (images dict)
+    支持两种初始化方式：
+    1. 指定文件路径: success_path, failure_path
+    2. 指定数据列表: success_data, failure_data
     """
     
     def __init__(
         self,
-        success_path: str,
-        failure_path: str,
         camera_keys: List[str],
-        image_size: Tuple[int, int] = (84, 84),
+        image_size: int = 224,
         balance: bool = True,
+        augment: bool = True,
+        # 方式 1: 文件路径
+        success_path: Optional[str] = None,
+        failure_path: Optional[str] = None,
+        # 方式 2: 数据列表（支持多文件合并）
+        success_data: Optional[List[Dict]] = None,
+        failure_data: Optional[List[Dict]] = None,
     ):
         self.camera_keys = camera_keys
         self.image_size = image_size
         self.samples = []  # List of (images_dict, label)
         
+        # 数据增强
+        self.transform = get_train_transforms(image_size) if augment else get_eval_transforms(image_size)
+        
         # 加载成功样本
-        with open(success_path, "rb") as f:
-            successes = pkl.load(f)
+        if success_data is not None:
+            successes = success_data
+        elif success_path is not None:
+            with open(success_path, "rb") as f:
+                successes = pkl.load(f)
+        else:
+            raise ValueError("Must provide either success_path or success_data")
         
         for t in successes:
             # observations 是 images dict 或包含 images 的 dict
@@ -169,8 +387,13 @@ class PickleClassifierDataset(Dataset):
         num_successes = len(self.samples)
         
         # 加载失败样本
-        with open(failure_path, "rb") as f:
-            failures = pkl.load(f)
+        if failure_data is not None:
+            failures = failure_data
+        elif failure_path is not None:
+            with open(failure_path, "rb") as f:
+                failures = pkl.load(f)
+        else:
+            raise ValueError("Must provide either failure_path or failure_data")
         
         # 平衡采样（可选）
         if balance and len(failures) > num_successes:
@@ -183,7 +406,7 @@ class PickleClassifierDataset(Dataset):
             if images:
                 self.samples.append((images, 0))
         
-        print(f"[Dataset] Loaded {len(self.samples)} samples from pickle")
+        print(f"[Dataset] Loaded {len(self.samples)} samples")
         print(f"[Dataset] Positive: {num_successes}")
         print(f"[Dataset] Negative: {len(self.samples) - num_successes}")
     
@@ -215,132 +438,29 @@ class PickleClassifierDataset(Dataset):
     
     def _preprocess_image(self, img: np.ndarray) -> torch.Tensor:
         """预处理图像"""
-        # HWC -> CHW
-        if img.ndim == 3 and img.shape[-1] in [1, 3, 4]:
-            img = np.transpose(img, (2, 0, 1))
+        # 确保是 HWC 格式和 uint8
+        if img.ndim == 3 and img.shape[0] in [1, 3, 4]:
+            img = np.transpose(img, (1, 2, 0))  # CHW -> HWC
         
-        img = torch.from_numpy(img).float()
-        if img.shape[-2:] != self.image_size:
-            img = F.interpolate(
-                img.unsqueeze(0),
-                size=self.image_size,
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)
+        if img.dtype != np.uint8:
+            if img.max() <= 1.0:
+                img = (img * 255).astype(np.uint8)
+            else:
+                img = img.astype(np.uint8)
         
-        # Normalize to [0, 1]
-        if img.max() > 1.0:
-            img = img / 255.0
+        # 确保是 RGB 3 通道
+        if img.ndim == 2:
+            img = np.stack([img, img, img], axis=-1)
+        elif img.shape[-1] == 1:
+            img = np.concatenate([img, img, img], axis=-1)
+        elif img.shape[-1] == 4:
+            img = img[:, :, :3]
         
-        return img
-
-
-class HDF5ClassifierDataset(Dataset):
-    """
-    从 HDF5 demo 文件加载的 Classifier 数据集
+        return self.transform(img)
     
-    从 demo HDF5 中提取：
-    - 正样本：每个 episode 的最后 N 帧（成功状态）
-    - 负样本：每个 episode 的前面若干帧（非成功状态）
-    """
-    
-    def __init__(
-        self,
-        hdf5_path: str,
-        camera_keys: List[str],
-        success_frames: int = 5,
-        negative_ratio: float = 1.0,
-        image_size: Tuple[int, int] = (84, 84),
-    ):
-        self.camera_keys = camera_keys
-        self.image_size = image_size
-        
-        self.samples = []  # List of (images_dict, label)
-        
-        with h5py.File(hdf5_path, "r") as f:
-            num_episodes = f.attrs.get("num_episodes", 0)
-            
-            for ep_idx in range(num_episodes):
-                ep_key = f"episode_{ep_idx}"
-                if ep_key not in f:
-                    continue
-                
-                ep = f[ep_key]
-                
-                # 检查是否有图像数据
-                images_available = all(
-                    f"images/{cam}" in ep for cam in camera_keys
-                )
-                
-                if not images_available:
-                    print(f"[Warning] Episode {ep_idx} missing images, using obs instead")
-                    continue
-                
-                # 获取 episode 长度
-                ep_len = len(ep["action"])
-                
-                # 正样本：最后 N 帧
-                for i in range(max(0, ep_len - success_frames), ep_len):
-                    images = {
-                        cam: ep[f"images/{cam}"][i] for cam in camera_keys
-                    }
-                    self.samples.append((images, 1))
-                
-                # 负样本：前面的帧（按比例采样）
-                num_negatives = int(success_frames * negative_ratio)
-                negative_indices = np.random.choice(
-                    max(0, ep_len - success_frames),
-                    size=min(num_negatives, max(0, ep_len - success_frames)),
-                    replace=False,
-                ) if ep_len > success_frames else []
-                
-                for i in negative_indices:
-                    images = {
-                        cam: ep[f"images/{cam}"][i] for cam in camera_keys
-                    }
-                    self.samples.append((images, 0))
-        
-        print(f"[Dataset] Loaded {len(self.samples)} samples")
-        print(f"[Dataset] Positive: {sum(1 for _, l in self.samples if l == 1)}")
-        print(f"[Dataset] Negative: {sum(1 for _, l in self.samples if l == 0)}")
-    
-    def __len__(self) -> int:
-        return len(self.samples)
-    
-    def __getitem__(self, idx: int) -> Tuple[List[torch.Tensor], torch.Tensor]:
-        images_dict, label = self.samples[idx]
-        
-        # 预处理图像
-        images = []
-        for cam in self.camera_keys:
-            img = images_dict[cam]
-            img = self._preprocess_image(img)
-            images.append(img)
-        
-        label = torch.tensor(label, dtype=torch.float32)
-        return images, label
-    
-    def _preprocess_image(self, img: np.ndarray) -> torch.Tensor:
-        """预处理图像"""
-        # HWC -> CHW
-        if img.ndim == 3 and img.shape[-1] in [1, 3, 4]:
-            img = np.transpose(img, (2, 0, 1))
-        
-        # Resize
-        img = torch.from_numpy(img).float()
-        if img.shape[-2:] != self.image_size:
-            img = F.interpolate(
-                img.unsqueeze(0),
-                size=self.image_size,
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)
-        
-        # Normalize to [0, 1]
-        if img.max() > 1.0:
-            img = img / 255.0
-        
-        return img
+    def set_augment(self, augment: bool):
+        """切换是否使用数据增强"""
+        self.transform = get_train_transforms(self.image_size) if augment else get_eval_transforms(self.image_size)
 
 
 def collate_fn(batch):
@@ -440,13 +560,14 @@ def train_classifier(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Reward Classifier")
+    parser = argparse.ArgumentParser(description="Train Reward Classifier (HIL-SERL style)")
     
     # 数据源（二选一）
     data_group = parser.add_mutually_exclusive_group(required=True)
-    data_group.add_argument("--demo", type=str, help="Demo HDF5 path (auto-extract success frames)")
+    data_group.add_argument("--data_dir", type=str,
+                            help="Data directory (auto-match success/failure files)")
     data_group.add_argument("--success_data", type=str, 
-                            help="Success pickle path (HIL-SERL format)")
+                            help="Success pickle path (requires --failure_data)")
     
     parser.add_argument("--failure_data", type=str, 
                         help="Failure pickle path (required with --success_data)")
@@ -454,19 +575,32 @@ def main():
                         help="Output model path")
     parser.add_argument("--cameras", type=str, nargs="+", 
                         default=["cam_high", "cam_left_wrist", "cam_right_wrist"],
-                        help="Camera names to use (H1: cam_high, cam_left_wrist, cam_right_wrist)")
-    parser.add_argument("--success_frames", type=int, default=5,
-                        help="Number of final frames to use as positive samples (HDF5 mode)")
-    parser.add_argument("--negative_ratio", type=float, default=1.0,
-                        help="Ratio of negative to positive samples")
+                        help="Camera names to use")
     parser.add_argument("--balance", action="store_true", default=True,
                         help="Balance positive and negative samples")
-    parser.add_argument("--epochs", type=int, default=50, help="Training epochs")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    
+    # 模型参数
+    parser.add_argument("--encoder", type=str, default="resnet18",
+                        choices=["resnet10", "resnet18", "resnet34", "resnet50"],
+                        help="Pretrained encoder (default: resnet18)")
+    parser.add_argument("--freeze_encoder", action="store_true", default=True,
+                        help="Freeze pretrained encoder (HIL-SERL default)")
+    parser.add_argument("--no_freeze_encoder", dest="freeze_encoder", action="store_false",
+                        help="Train encoder end-to-end")
+    parser.add_argument("--hidden_dim", type=int, default=256,
+                        help="Classifier hidden dimension")
+    parser.add_argument("--num_spatial_blocks", type=int, default=8,
+                        help="Number of spatial learned embeddings")
+    
+    # 训练参数
+    parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--image_size", type=int, default=84, help="Image size")
+    parser.add_argument("--image_size", type=int, default=224, 
+                        help="Image size (default: 224 for ImageNet pretrained)")
     parser.add_argument("--device", type=str, default="cuda", help="Device")
     parser.add_argument("--val_split", type=float, default=0.2, help="Validation split")
+    parser.add_argument("--no_augment", action="store_true", help="Disable data augmentation")
     args = parser.parse_args()
     
     # 校验参数
@@ -476,31 +610,49 @@ def main():
     logger = Logger(log_dir="./logs")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     
+    logger.info("=" * 60)
+    logger.info("Reward Classifier Training (HIL-SERL style)")
+    logger.info("=" * 60)
+    logger.info(f"Encoder: {args.encoder} (freeze={args.freeze_encoder})")
+    logger.info(f"Cameras: {args.cameras}")
+    logger.info(f"Image size: {args.image_size}")
+    logger.info(f"Device: {device}") 
+    
     # 创建数据集
-    if args.success_data:
-        # HIL-SERL pickle 格式
+    if args.data_dir:
+        # 自动匹配目录中的 success/failure 文件
+        logger.info(f"Auto-matching files in: {args.data_dir}")
+        
+        success_files, failure_files = find_classifier_data(args.data_dir)
+        logger.info(f"Found {len(success_files)} success files, {len(failure_files)} failure files")
+        
+        if not success_files or not failure_files:
+            logger.error("Need at least one success and one failure file")
+            return
+        
+        success_data = load_pickle_data(success_files)
+        failure_data = load_pickle_data(failure_files)
+        logger.info(f"Loaded {len(success_data)} success samples, {len(failure_data)} failure samples")
+        
+        dataset = PickleClassifierDataset(
+            camera_keys=args.cameras,
+            success_data=success_data,
+            failure_data=failure_data,
+            image_size=args.image_size,
+            balance=args.balance,
+            augment=not args.no_augment,
+        )
+    else:
+        # HIL-SERL pickle 格式（手动指定文件）
         logger.info(f"Loading from pickle: {args.success_data}, {args.failure_data}")
-        logger.info(f"Cameras: {args.cameras}")
         
         dataset = PickleClassifierDataset(
             success_path=args.success_data,
             failure_path=args.failure_data,
             camera_keys=args.cameras,
-            image_size=(args.image_size, args.image_size),
+            image_size=args.image_size,
             balance=args.balance,
-        )
-    else:
-        # HDF5 demo 格式
-        logger.info(f"Loading from HDF5: {args.demo}")
-        logger.info(f"Cameras: {args.cameras}")
-        logger.info(f"Success frames: {args.success_frames}")
-        
-        dataset = HDF5ClassifierDataset(
-            hdf5_path=args.demo,
-            camera_keys=args.cameras,
-            success_frames=args.success_frames,
-            negative_ratio=args.negative_ratio,
-            image_size=(args.image_size, args.image_size),
+            augment=not args.no_augment,
         )
     
     if len(dataset) == 0:
@@ -520,22 +672,32 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True,
     ) if val_size > 0 else None
     
-    # 创建模型
+    # 创建模型（使用预训练 ResNet）
     model = RewardClassifier(
-        image_channels=3,
-        image_size=(args.image_size, args.image_size),
         num_cameras=len(args.cameras),
+        encoder_name=args.encoder,
+        freeze_encoder=args.freeze_encoder,
+        pretrained=True,
+        hidden_dim=args.hidden_dim,
+        num_spatial_blocks=args.num_spatial_blocks,
     ).to(device)
     
-    logger.info(f"Model: {sum(p.numel() for p in model.parameters())} parameters")
+    # 统计参数
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Model: {total_params/1e6:.2f}M params, {trainable_params/1e6:.2f}M trainable")
     
     # 训练
     history = train_classifier(
@@ -556,6 +718,9 @@ def main():
             "cameras": args.cameras,
             "image_size": args.image_size,
             "num_cameras": len(args.cameras),
+            "encoder": args.encoder,
+            "hidden_dim": args.hidden_dim,
+            "num_spatial_blocks": args.num_spatial_blocks,
         },
         "history": history,
     }, args.output)
