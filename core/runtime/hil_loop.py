@@ -70,6 +70,10 @@ class HILActorConfig:
     weight_sync_freq: int = 1
     transition_batch_size: int = 1
     require_initial_weights: bool = True
+    # Standalone 模式：不连接 Learner，本地收集数据
+    standalone: bool = False
+    standalone_buffer_capacity: int = 50000
+    standalone_save_dir: str = "./standalone_data"
     # 奖励分类器（通过 project 的 reward_config.py 配置）
     use_reward_classifier: bool = False
     project_dir: Optional[str] = None  # 项目目录，用于加载 reward_config.py
@@ -277,7 +281,13 @@ class HILActorLoop(BaseLoop):
                 print(f"[HIL-Actor] Using reward_config: threshold={self.config.reward_classifier_threshold}")
         
         # 创建或使用注入的通信客户端
-        if actor_client is not None:
+        self.standalone = config.standalone
+        if self.standalone:
+            # Standalone 模式：本地收集数据，不连接 Learner
+            self.client = None
+            self._init_standalone_buffers()
+            print("[HIL-Actor] Running in STANDALONE mode (no Learner connection)")
+        elif actor_client is not None:
             self.client = actor_client
         else:
             if sync_config is None:
@@ -290,6 +300,7 @@ class HILActorLoop(BaseLoop):
         self._episode_step = 0
         self._episode_count = 0
         self._episode_reward = 0.0
+        self._was_intervention = False  # 用于检测 intervention → policy 切换
         
         # 统计
         self._intervention_count = 0
@@ -304,6 +315,10 @@ class HILActorLoop(BaseLoop):
     
     def setup(self) -> None:
         """启动前的设置"""
+        if self.standalone:
+            print("[HIL-Actor] Standalone mode - skipping Learner connection")
+            return
+        
         print("[HIL-Actor] Connecting to Learner...")
         self.client.connect()
         
@@ -342,6 +357,13 @@ class HILActorLoop(BaseLoop):
         # 确保环境已重置
         if self._current_obs is None:
             self._reset_episode()
+        
+        # 检测 intervention → policy 切换，重置 policy 缓存避免动作跳变
+        current_is_intervention = self._current_info.get("is_intervention", False) if self._current_info else False
+        if self._was_intervention and not current_is_intervention:
+            if hasattr(self.policy, 'reset'):
+                self.policy.reset()
+                print("[HIL-Actor] Reset policy (VR → Policy transition)")
         
         # 获取策略动作
         policy_action = self.policy.act(self._current_obs, deterministic=self.config.deterministic)
@@ -387,6 +409,9 @@ class HILActorLoop(BaseLoop):
         self._total_actions += 1
         if is_intervention:
             self._intervention_count += 1
+        
+        # 记录本次是否是 intervention，用于下次检测切换
+        self._was_intervention = is_intervention
         
         # 构建返回
         step_info = {
@@ -508,7 +533,16 @@ class HILActorLoop(BaseLoop):
         raise ValueError(f"Cannot extract state from: {obs.keys()}")
     
     def _buffer_and_send(self, transition: Dict) -> None:
-        """缓冲并发送"""
+        """缓冲并发送（或本地存储）"""
+        if self.standalone:
+            # Standalone 模式：存到本地 buffer
+            if transition.get("is_intervention", False):
+                self._standalone_intervention_buffer.append(transition)
+            else:
+                self._standalone_rollout_buffer.append(transition)
+            return
+        
+        # 正常模式：发送到 Learner
         self._transition_buffer.append(transition)
         if len(self._transition_buffer) >= self.config.transition_batch_size:
             self.client.send_transitions(self._transition_buffer)
@@ -516,6 +550,9 @@ class HILActorLoop(BaseLoop):
     
     def _try_sync_weights(self) -> bool:
         """尝试同步权重"""
+        if self.standalone:
+            return False  # Standalone 模式不同步权重
+        
         weights = self.client.recv_weights(block=False)
         if weights is not None:
             self.policy.load_weights(weights)
@@ -525,17 +562,51 @@ class HILActorLoop(BaseLoop):
     
     def cleanup(self) -> None:
         """清理"""
+        if self.standalone:
+            # 保存本地收集的数据
+            self._save_standalone_buffers()
+            return
+        
         if self._transition_buffer:
             self.client.send_transitions(self._transition_buffer)
         self.client.disconnect()
     
     def get_statistics(self) -> Dict[str, Any]:
-        return {
+        stats = {
             "episode_count": self._episode_count,
             "total_steps": self._step_count,
             "intervention_rate": self._intervention_count / max(self._total_actions, 1),
             "weight_sync_count": self._weight_sync_count,
         }
+        if self.standalone:
+            stats["standalone_rollout_size"] = len(self._standalone_rollout_buffer)
+            stats["standalone_intervention_size"] = len(self._standalone_intervention_buffer)
+        return stats
+    
+    def _init_standalone_buffers(self) -> None:
+        """初始化 standalone 模式的本地 buffer"""
+        self._standalone_rollout_buffer: List[Dict] = []
+        self._standalone_intervention_buffer: List[Dict] = []
+    
+    def _save_standalone_buffers(self) -> None:
+        """保存 standalone 模式收集的数据"""
+        import pickle
+        save_dir = self.config.standalone_save_dir
+        os.makedirs(save_dir, exist_ok=True)
+        
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        
+        if self._standalone_rollout_buffer:
+            rollout_path = os.path.join(save_dir, f"rollout_{timestamp}.pkl")
+            with open(rollout_path, "wb") as f:
+                pickle.dump(self._standalone_rollout_buffer, f)
+            print(f"[HIL-Actor] Saved {len(self._standalone_rollout_buffer)} rollout transitions to {rollout_path}")
+        
+        if self._standalone_intervention_buffer:
+            intervention_path = os.path.join(save_dir, f"intervention_{timestamp}.pkl")
+            with open(intervention_path, "wb") as f:
+                pickle.dump(self._standalone_intervention_buffer, f)
+            print(f"[HIL-Actor] Saved {len(self._standalone_intervention_buffer)} intervention transitions to {intervention_path}")
 
 
 # ============ HIL Learner Loop ============
@@ -692,14 +763,22 @@ class HILLearnerLoop(BaseLoop):
         return avg_metrics
     
     def _route_transitions(self, transitions: List[Dict]) -> None:
-        """分流到对应 buffer"""
+        """
+        分流到对应 buffer（对齐 HIL-SERL 原版逻辑）
+        
+        - 所有数据都存入 rollout_buffer（干预时 action 已被替换为人类动作）
+        - 干预数据额外复制一份到 intervention_buffer（用于 demo 采样加权）
+        """
         for t in transitions:
             self._transitions_received += 1
+            
+            # 所有数据都存入 rollout（HIL-SERL: data_store.insert(transition)）
+            self.rollout_buffer.add(t)
+            
+            # 干预数据额外存一份（HIL-SERL: intvn_data_store.insert(transition)）
             if t.get("is_intervention", False):
                 self._interventions_received += 1
                 self.intervention_buffer.add(t)
-            else:
-                self.rollout_buffer.add(t)
     
     def _sample_batch(self) -> Optional[Dict]:
         """采样"""

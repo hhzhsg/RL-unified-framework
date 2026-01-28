@@ -300,38 +300,57 @@ def run_actor(config: dict, args):
     policy = StateEchoAdapter(state_dim=state_dim, action_dim=action_dim)
     print("[Actor] Policy: StateEchoAdapter (state → action)")
     
-    # 通信配置
-    learner_host = args.learner_host or sync_cfg.get('host', 'localhost')
-    learner_port = sync_cfg.get('port', 50060)
+    # Standalone 模式
+    standalone = args.standalone or actor_cfg.get('standalone', False)
     
-    sync_config = ActorLearnerConfig(
-        learner_host=learner_host,
-        learner_port=learner_port,
-    )
-    
-    actor_config = HILActorConfig(
-        deterministic=actor_cfg.get('deterministic', False),
-        max_episode_steps=actor_cfg.get('max_episode_steps', 500),
-        weight_sync_freq=actor_cfg.get('weight_sync_freq', 10),
-        transition_batch_size=actor_cfg.get('transition_batch_size', 1),
-        require_initial_weights=actor_cfg.get('require_initial_weights', True),
-    )
-    
-    actor = HILActorLoop(
-        policy_adapter=policy,
-        env=env,
-        config=actor_config,
-        sync_config=sync_config,
-        mode="grpc",
-    )
-    
-    print(f"[Actor] Learner: {learner_host}:{learner_port}")
+    if standalone:
+        # Standalone 模式：不需要通信配置
+        actor_config = HILActorConfig(
+            deterministic=actor_cfg.get('deterministic', False),
+            max_episode_steps=actor_cfg.get('max_episode_steps', 500),
+            standalone=True,
+            standalone_save_dir=actor_cfg.get('standalone_save_dir', './standalone_data'),
+        )
+        actor = HILActorLoop(
+            policy_adapter=policy,
+            env=env,
+            config=actor_config,
+            sync_config=None,
+            mode="local",
+        )
+        print("[Actor] 🟢 STANDALONE 模式：本地收集数据，不连接 Learner")
+    else:
+        # 正常模式：连接 Learner
+        learner_host = args.learner_host or sync_cfg.get('host', 'localhost')
+        learner_port = sync_cfg.get('port', 50060)
+        
+        sync_config = ActorLearnerConfig(
+            learner_host=learner_host,
+            learner_port=learner_port,
+        )
+        
+        actor_config = HILActorConfig(
+            deterministic=actor_cfg.get('deterministic', False),
+            max_episode_steps=actor_cfg.get('max_episode_steps', 500),
+            weight_sync_freq=actor_cfg.get('weight_sync_freq', 10),
+            transition_batch_size=actor_cfg.get('transition_batch_size', 1),
+            require_initial_weights=actor_cfg.get('require_initial_weights', True),
+        )
+        
+        actor = HILActorLoop(
+            policy_adapter=policy,
+            env=env,
+            config=actor_config,
+            sync_config=sync_config,
+            mode="grpc",
+        )
+        print(f"[Actor] Learner: {learner_host}:{learner_port}")
     if env_cfg.get('dry_run'):
         print("[Actor] ⚠️ DRY-RUN 模式：不下发动作")
     print()
     
     log_freq = log_cfg.get('log_freq', 10)
-    max_steps = actor_cfg.get('max_episode_steps', 500)
+    max_steps = args.max_steps or actor_cfg.get('max_steps', 10000)
     
     try:
         actor.run(num_steps=max_steps, log_freq=log_freq)
@@ -426,6 +445,10 @@ def main():
                         help="启用相机（覆盖配置文件）")
     parser.add_argument("--use-dummy-env", action="store_true",
                         help="使用 DummyEnv（开发机测试）")
+    parser.add_argument("--standalone", action="store_true",
+                        help="Standalone 模式：不连接 Learner，本地收集数据")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="最大运行步数（覆盖配置文件）")
     
     args = parser.parse_args()
     

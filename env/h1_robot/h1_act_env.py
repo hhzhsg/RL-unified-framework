@@ -36,8 +36,8 @@ from idl.python.PolicyAction import PolicyAction
 from idl.python.PolicyState import PolicyState
 
 
-@register_env("h1_robot")
-class H1RobotEnv(BaseEnv):
+@register_env("h1_robot_act")
+class H1ActEnv(BaseEnv):
     """H1机器人环境（纯 ZCM 订阅模式）"""
     
     def __init__(self, config: Dict[str, Any]):
@@ -120,9 +120,6 @@ class H1RobotEnv(BaseEnv):
         self.dry_run = config.get("dry_run", False)  # 只读观测，不下发动作
         if self.dry_run:
             print("[H1RobotEnv] ⚠️ DRY-RUN 模式：不下发动作")
-        
-        # ========== 复位配置 ==========
-        self.auto_reset = config.get("auto_reset", False)  # 是否在 reset 时自动复位
         
         # ========== HIL 干预状态 ==========
         self.operator_type = "policy"
@@ -255,75 +252,59 @@ class H1RobotEnv(BaseEnv):
     @property
     def observation_space(self) -> Dict[str, Any]:
         """
-        规范观测空间 (37 维 state + images):
-        - arm/position: 14 (左右臂各 7 关节)
-        - arm/velocity: 14 (关节速度)
-        - effector/position: 2 (左右 gripper)
+        ACT 观测空间 (15 维 qpos + images):
+        - right_arm/position: 7 (右臂关节)
+        - right_gripper/position: 1 (右 gripper)
         - waist/position: 3 (height, pitch, yaw)
         - head/position: 2 (pitch, yaw)
         - base/velocity: 2 (x, yaw)
         """
         return {
-            "state": {"shape": (37,), "dtype": "float32"},
-            "images": {"type": "dict"},
+            "qpos": {"shape": (15,), "dtype": "float32"},
+            "images": {"shape": (4, 3, 480, 640), "dtype": "float32"},
         }
     
     @property
     def action_space(self) -> Dict[str, Any]:
         """
-        规范动作空间 (23 维):
-        - arm/position: 14 (左右臂各 7 关节)
-        - effector/position: 2 (左右 gripper)
+        ACT 动作空间 (15 维):
+        - right_arm/position: 7 (右臂关节)
+        - right_gripper/position: 1 (右 gripper)
         - waist/position: 3 (height, pitch, yaw)
         - head/position: 2 (pitch, yaw)
         - base/velocity: 2 (x, yaw)
         """
-        return {"shape": (23,), "dtype": "float32", "low": -1.0, "high": 1.0}
+        return {"shape": (15,), "dtype": "float32", "low": -1.0, "high": 1.0}
     
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        # 可选：复位到初始位置（需要机器人支持）
-        if self.auto_reset:
-            self.move_to_init_pose()
-        
         obs = self.get_observation()
         info = {}
         return obs, info
     
     def get_observation(self) -> Dict[str, Any]:
-        """
-        获取观测（从 ZCM 缓存的状态构建）
-        
-        返回:
-            obs['qpos']: 37 维规范状态向量 (np.array)
-            obs['images']: 图像 tensor (torch.Tensor, shape: num_cam x C x H x W, 已在 GPU)
-        
-        格式对齐 ACT Plus eval 要求:
-            - qpos: np.array (state_dim,)
-            - images: torch.Tensor 在 GPU 上
-        """
+        '''
+        Returns:
+            qpos: Bx15 - 右臂(7) + 右gripper(1) + waist(3) + head(2) + base(2)
+            images: Bx4x3x480x640 - 4个相机图像
+        '''
         obs = collections.OrderedDict()
         
-        # ========== 规范 qpos (37 维) ==========
-        # [0:14]   arm position
-        # [14:28]  arm velocity
-        # [28:30]  gripper position
-        # [30:33]  waist position (height, pitch, yaw)
-        # [33:35]  head position (pitch, yaw)
-        # [35:37]  base velocity (x, yaw)
+        # ========== ACT qpos (15 维) ==========
         qpos = np.concatenate([
-            self.joint_state,      # 14: arm position
-            self.joint_vel,        # 14: arm velocity
-            self.gripper_state,    # 2: gripper position
+            self.joint_state[7:],      # 7: right arm position
+            self.gripper_state[1:2],    # 2: right gripper position
             self.waist_state,      # 3: waist position
             self.head_state,       # 2: head position
             self.chassis_state,    # 2: base velocity
         ])
-        obs['qpos'] = qpos.astype(np.float32)
-        
+        obs['qpos'] = torch.from_numpy(qpos.astype(np.float32)).unsqueeze(0)
+        if torch.cuda.is_available():
+            obs['qpos'] = obs['qpos'].cuda()
+
         # 图像: Dict[str, np.ndarray] → torch.Tensor (num_cam, C, H, W) on GPU
         if self.image_recorder is not None:
             image_dict = self.image_recorder.get_images()
-            obs['images'] = self._images_to_tensor(image_dict)
+            obs['images'] = self._images_to_tensor(image_dict).unsqueeze(0)
         else:
             obs['images'] = torch.empty(0)
         
@@ -331,30 +312,53 @@ class H1RobotEnv(BaseEnv):
     
     def _images_to_tensor(self, image_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
-        将图像字典转换为 torch.Tensor
+        将相机图像转换为 tensor
         
-        Args:
-            image_dict: {cam_name: np.ndarray (H, W, C) BGR uint8}
+        camera_sdk 输出格式（split_stereo=True 时）:
+            {'cam_high_0': img, 'cam_high_1': img, 'cam_right_wrist_0': img, 'cam_right_wrist_1': img}
         
-        Returns:
-            torch.Tensor: shape (num_cam, C, H, W), float32, normalized to [0,1], on GPU
+        输出: (num_cam, C, H, W) tensor on GPU
+        
+        注意: 如果某个相机缺失，会用黑图填充并打印警告
         """
         if not image_dict:
             return torch.empty(0)
         
         images = []
-        for cam_name in sorted(image_dict.keys()):  # 保证顺序一致
-            img = image_dict[cam_name]
-            if img is None:
-                continue
-            # (H, W, C) → (C, H, W), BGR→RGB, uint8→float32 normalized
-            img = img[:, :, ::-1].copy()  # BGR → RGB
-            img = np.transpose(img, (2, 0, 1))  # (H, W, C) → (C, H, W)
-            img = img.astype(np.float32) / 255.0  # normalize to [0, 1]
-            images.append(img)
+        missing_warned = False
+        
+        # 先获取一个参考图像用于确定目标尺寸
+        sample_img = next(iter(image_dict.values()))
+        target_shape = sample_img.shape  # (H, W, C)
+        
+        # camera_sdk 已经分割好了，直接按顺序取
+        # 从 'v4l2/cam_high' 提取 'cam_high'，然后加 _0, _1
+        for cam_name in self.camera_names:
+            pure_name = cam_name.replace('v4l2/', '').replace('rs/', '')
+            
+            for suffix in ['_0', '_1']:
+                key = f"{pure_name}{suffix}"
+                if key not in image_dict:
+                    # 缺失时用黑图填充
+                    if not missing_warned:
+                        print(f"[WARN] Camera missing: {key}, available: {list(image_dict.keys())}. Using black placeholder.")
+                        missing_warned = True
+                    # 用参考图像的尺寸创建黑图
+                    img = np.zeros(target_shape, dtype=np.uint8)
+                else:
+                    img = image_dict[key]
+                    # 确保图像尺寸一致（resize 如果不同）
+                    if img.shape != target_shape:
+                        import cv2
+                        img = cv2.resize(img, (target_shape[1], target_shape[0]))
+                
+                # (H, W, C) → (C, H, W), BGR→RGB, uint8→float32 normalized
+                img = np.transpose(img, (2, 0, 1))  # (H, W, C) → (C, H, W)
+                img = img.astype(np.float32) / 255.0  # normalize to [0, 1]
+                images.append(img)
         
         if not images:
-            return torch.empty(0)
+            raise ValueError("No images found")
         
         # Stack and move to GPU
         images_tensor = torch.from_numpy(np.stack(images, axis=0))  # (num_cam, C, H, W)
@@ -378,36 +382,35 @@ class H1RobotEnv(BaseEnv):
         """
         执行动作
         
-        动作格式 (23 维):
-        - [0:14]  arm position (左 7 + 右 7)
-        - [14:16] gripper position (左 + 右)
-        - [16:19] waist position (height, pitch, yaw)
-        - [19:21] head position (pitch, yaw)
-        - [21:23] base velocity (x, yaw)
+        ACT 动作格式 (15 维):
+        - [0:7]   right arm position (右臂 7 关节)
+        - [7:8]   right gripper position
+        - [8:11]  waist position (height, pitch, yaw)
+        - [11:13] head position (pitch, yaw)
+        - [13:15] base velocity (x, yaw)
         
-        注意: PolicyAction IDL 格式不同:
-        - left_joint_action[8] = arm[0:7] + gripper[0]
-        - right_joint_action[8] = arm[7:14] + gripper[1]
+        注意: PolicyAction IDL 格式:
+        - left_joint_action[8] = left_arm[0:7] + left_gripper（保持当前值）
+        - right_joint_action[8] = right_arm[0:7] + right_gripper
         - waist[3], head[2]
         """
         a = np.asarray(action, dtype=np.float64).flatten()
         
-        if len(a) < 23:
-            a = np.pad(a, (0, 23 - len(a)), mode='constant', constant_values=0)
+        # 解析 ACT 动作 (15 维)
+        right_arm = a[:8]       # 8: 右臂关节 + gripper
+        waist_pos = a[8:11]     # 3: 腰部
+        head_pos = a[11:13]     # 2: 头部
+        base_vel = a[13:15]     # 2: 底盘（暂不使用）
         
-        # 解析动作 (23 维规范格式)
-        arm_pos = a[0:14]       # 14: 左右臂关节
-        gripper_pos = a[14:16]  # 2: 左右夹爪
-        waist_pos = a[16:19]    # 3: 腰部
-        head_pos = a[19:21]     # 2: 头部
-        base_vel = a[21:23]     # 2: 底盘速度
+        # 左臂保持当前状态
+        left_arm = np.concatenate([self.joint_state[:7], [self.gripper_state[0]]])
         
         # dry_run 模式：只读取观测，不下发动作
         if not self.dry_run:
             # 转换为 PolicyAction IDL 格式
             self.policy_action.operator_type = "policy"
-            self.policy_action.left_joint_action = np.concatenate([arm_pos[:7], [gripper_pos[0]]]).tolist()
-            self.policy_action.right_joint_action = np.concatenate([arm_pos[7:14], [gripper_pos[1]]]).tolist()
+            self.policy_action.left_joint_action = left_arm.tolist()
+            self.policy_action.right_joint_action = right_arm.tolist()
             self.policy_action.waist = waist_pos.tolist()
             self.policy_action.head = head_pos.tolist()
             self.policy_action.publiser_name = "h1_robot_env"
@@ -424,7 +427,7 @@ class H1RobotEnv(BaseEnv):
         self._step_count += 1
         if self._step_count % 100 == 1:
             mode = "[DRY-RUN]" if self.dry_run else "[PUBLISH]"
-            print(f"[H1] {mode} Action: arm={a[:14].round(3)}, grip={a[14:16].round(3)}, waist={a[16:19].round(3)}, head={a[19:21].round(3)}, base={a[21:23].round(3)}")
+            print(f"[H1] {mode} Action: arm={a[:7].round(3)}, grip={a[7].round(3)}, waist={a[8:11].round(3)}, head={a[11:13].round(3)}")
         
         # 获取观测
         obs = self.get_observation()
@@ -432,7 +435,6 @@ class H1RobotEnv(BaseEnv):
         # HIL 干预检测
         is_intervention = (self.operator_type != "policy")
         
-        # env 层面不判断超时，由 hil_loop 统一处理
         reward = 0.0
         terminated = False
         truncated = False
@@ -441,38 +443,23 @@ class H1RobotEnv(BaseEnv):
             "operator_type": self.operator_type,
             "policy_action": a,
         }
-        if is_intervention:
-            info["intervene_action"] = self.get_action()
-        
+        # print(self.operator_type)
         return obs, reward, terminated, truncated, info
     
     def get_buttons(self) -> Tuple[float, float, float, float]:
         """获取 VR 按钮状态"""
         return self.buttons[0], self.buttons[1], self.buttons[2], self.buttons[3]
     
-    def move_to_init_pose(self, timeout: float = 30.0) -> bool:
-        """
-        发送复位信号（通过 ZCM）
-        
-        Args:
-            timeout: 超时时间（秒），默认 30 秒
-        
-        Returns:
-            bool: 复位是否成功
-        """
+    def move_to_init_pose(self) -> None:
+        """发送复位信号（通过 ZCM）"""
         print("[H1RobotEnv] Waiting for reset...")
-        start_time = time.time()
         while not self.reset_state:
-            if time.time() - start_time > timeout:
-                print(f"[H1RobotEnv] ⚠️ Reset timeout after {timeout}s")
-                return False
-            init_msg = self._system_init_t()
+            init_msg = self._system_init_zcmt()
             init_msg.system_init = 1
             self.zcm_node.publish("reset_signal", init_msg)
             time.sleep(0.5)
         self.reset_state = 0
         print("[H1RobotEnv] Reset done")
-        return True
     
     # ========== 坐标变换工具函数 ==========
     

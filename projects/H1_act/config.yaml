@@ -1,0 +1,47 @@
+# H1_act 项目配置
+# ACT++ HIL 推理 + 数据收集
+
+# 策略配置
+policy:
+  type: act
+  ckpt_dir: ./checkpoints
+  ckpt_name: policy_last.ckpt
+  device: cuda
+  # ACT 模型参数（可选覆盖）
+  # action_dim: 15
+  # hidden_dim: 512
+  # dim_feedforward: 3200
+  # num_queries: 100
+  # backbone: "resnet18"
+
+# 环境配置
+env:
+  type: h1_robot
+  use_camera: true
+  dry_run: false
+  camera_grpc_target: "localhost:50051"
+  camera_names:
+    - v4l2/cam_high
+    - v4l2/cam_right_wrist
+  split_stereo: true  # 双目分割成左右图像
+
+# HIL Actor 配置
+hil_actor:
+  deterministic: true
+  max_episode_steps: 500
+  weight_sync_freq: 10
+  transition_batch_size: 1
+  standalone: true  # 先用 standalone 模式测试
+  standalone_save_dir: ./collected_data
+
+# 分布式同步配置（standalone=false 时生效）
+sync:
+  mode: grpc
+  learner_host: localhost
+  learner_port: 50060
+  max_retry: 3
+
+# 数据保存配置
+data:
+  save_format: hdf5
+  compress: true

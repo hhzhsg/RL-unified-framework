@@ -113,13 +113,17 @@ class ImageRecorder:
     
     def stop(self) -> None:
         """停止采集"""
-        self.stop_event.set()
-        if hasattr(self.cli, 'stop'):
+        if hasattr(self, 'stop_event'):
+            self.stop_event.set()
+        if hasattr(self, 'cli') and hasattr(self.cli, 'stop'):
             self.cli.stop()
         logger.info("[ImageRecorder] Stopped")
     
     def __del__(self):
-        self.stop()
+        try:
+            self.stop()
+        except Exception:
+            pass  # 忽略析构时的错误
 
 
 if __name__ == '__main__':
