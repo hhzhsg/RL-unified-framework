@@ -31,7 +31,6 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from env.h1_robot import H1RobotEnv
-from core.interfaces.policy_adapter import PolicyAdapter, TrainablePolicyAdapter
 
 
 def load_config(config_path: str) -> dict:
@@ -40,9 +39,9 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-# ============ StateEcho Adapter（测试用）============
+# ============ StateEcho Policy（测试用）============
 
-class StateEchoAdapter(PolicyAdapter):
+class StateEchoPolicy:
     """
     测试用：从 qpos 提取位置信息作为 action（机器人保持静止）
     
@@ -142,7 +141,7 @@ class StateEchoAdapter(PolicyAdapter):
         return torch.device("cpu")
 
 
-class StateEchoTrainer(TrainablePolicyAdapter):
+class StateEchoTrainer:
     """
     测试用：打印 batch 统计，区分 rollout/intervention
     
@@ -157,7 +156,7 @@ class StateEchoTrainer(TrainablePolicyAdapter):
         self._dummy_weights = {"step": torch.zeros(1)}
         self._step = 0
     
-    # ========== PolicyAdapter 必需方法 ==========
+    # ========== Policy Protocol 方法 ==========
     
     def act(self, obs: dict, deterministic: bool = False) -> np.ndarray:
         qpos = obs.get('qpos', None)
@@ -181,7 +180,7 @@ class StateEchoTrainer(TrainablePolicyAdapter):
     def device(self) -> torch.device:
         return self._device
     
-    # ========== TrainablePolicyAdapter 必需方法 ==========
+    # ========== Trainer Protocol 方法 ==========
     
     def forward(self, obs: dict) -> torch.Tensor:
         # Dummy forward
@@ -297,8 +296,8 @@ def run_actor(config: dict, args):
     # 策略
     state_dim = policy_cfg.get('state_dim', 37)
     action_dim = policy_cfg.get('action_dim', 23)
-    policy = StateEchoAdapter(state_dim=state_dim, action_dim=action_dim)
-    print("[Actor] Policy: StateEchoAdapter (state → action)")
+    policy = StateEchoPolicy(state_dim=state_dim, action_dim=action_dim)
+    print("[Actor] Policy: StateEchoPolicy (state → action)")
     
     # Standalone 模式
     standalone = args.standalone or actor_cfg.get('standalone', False)
@@ -312,7 +311,7 @@ def run_actor(config: dict, args):
             standalone_save_dir=actor_cfg.get('standalone_save_dir', './standalone_data'),
         )
         actor = HILActorLoop(
-            policy_adapter=policy,
+            policy=policy,
             env=env,
             config=actor_config,
             sync_config=None,
@@ -338,7 +337,7 @@ def run_actor(config: dict, args):
         )
         
         actor = HILActorLoop(
-            policy_adapter=policy,
+            policy=policy,
             env=env,
             config=actor_config,
             sync_config=sync_config,
@@ -402,7 +401,7 @@ def run_learner(config: dict, args):
     )
     
     learner = HILLearnerLoop(
-        trainable_adapter=trainer,
+        trainer=trainer,
         config=learner_config,
         sync_config=sync_config,
         mode="grpc",

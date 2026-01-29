@@ -34,18 +34,28 @@ from core.synchronization.actor_learner import (
 
 # ============ 协议定义 ============
 
-class PolicyAdapterProtocol(Protocol):
-    """策略适配器协议（Actor 使用）"""
+class Policy(Protocol):
+    """
+    策略协议（统一接口）
+    
+    所有策略（框架内 BasePolicy / 外部 ACTPolicy / Pi0Policy）都实现此协议
+    """
     def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Any: ...
     def get_weights(self) -> Dict[str, torch.Tensor]: ...
     def load_weights(self, weights: Dict[str, torch.Tensor]) -> None: ...
+    def reset(self) -> None: ...
 
 
-class TrainableAdapterProtocol(Protocol):
-    """可训练适配器协议（Learner 使用）"""
+class Trainer(Protocol):
+    """训练器协议（Learner 使用）"""
     def update(self, batch: Dict[str, Any]) -> Dict[str, float]: ...
     def get_weights(self) -> Dict[str, torch.Tensor]: ...
     def save(self, path: str) -> None: ...
+
+
+# 兼容旧名称
+PolicyAdapterProtocol = Policy
+TrainableAdapterProtocol = Trainer
 
 
 class BufferProtocol(Protocol):
@@ -246,7 +256,7 @@ class HILActorLoop(BaseLoop):
     
     def __init__(
         self,
-        policy_adapter: PolicyAdapterProtocol,
+        policy: Policy,  # 任何实现 Policy 协议的对象
         env,  # EnvInterface，可能被 Wrapper 包装
         config: HILActorConfig,
         sync_config: Optional[ActorLearnerConfig] = None,
@@ -258,7 +268,7 @@ class HILActorLoop(BaseLoop):
         # 手动管理 step_count，防止 BaseLoop.run() 重复递增
         self._manual_step_increment = True
         
-        self.policy = policy_adapter
+        self.policy = policy
         self.env = env
         self.config = config
         self.reward_classifier = reward_classifier
@@ -302,6 +312,16 @@ class HILActorLoop(BaseLoop):
         self._episode_reward = 0.0
         self._was_intervention = False  # 用于检测 intervention → policy 切换
         
+        # ========== VR → Policy 平滑过渡（通用 HIL 保护机制）==========
+        # 当 VR 放开后，不立即执行 policy 动作，而是：
+        # 1. 缓冲期：继续执行上一个 VR 动作（让策略有时间"热身"）
+        # 2. 过渡期：线性混合 VR 动作和 policy 动作
+        self._last_vr_action = None  # 记录最后一次 VR 动作（从环境状态获取）
+        self._buffer_steps = 0       # 缓冲计数器（执行 VR 动作）
+        self._transition_steps = 0   # 过渡计数器（混合动作）
+        self._buffer_duration = getattr(config, 'vr_buffer_duration', 10)      # 缓冲步数
+        self._transition_duration = getattr(config, 'vr_transition_duration', 10)  # 过渡步数
+        
         # 统计
         self._intervention_count = 0
         self._total_actions = 0
@@ -317,6 +337,7 @@ class HILActorLoop(BaseLoop):
         """启动前的设置"""
         if self.standalone:
             print("[HIL-Actor] Standalone mode - skipping Learner connection")
+            self._initial_weights_synced = True  # 标记已初始化，避免重复调用
             return
         
         print("[HIL-Actor] Connecting to Learner...")
@@ -358,23 +379,68 @@ class HILActorLoop(BaseLoop):
         if self._current_obs is None:
             self._reset_episode()
         
-        # 检测 intervention → policy 切换，重置 policy 缓存避免动作跳变
-        current_is_intervention = self._current_info.get("is_intervention", False) if self._current_info else False
-        if self._was_intervention and not current_is_intervention:
-            if hasattr(self.policy, 'reset'):
-                self.policy.reset()
-                print("[HIL-Actor] Reset policy (VR → Policy transition)")
-        
-        # 获取策略动作
+        # 获取策略动作（始终计算，用于预热）
         policy_action = self.policy.act(self._current_obs, deterministic=self.config.deterministic)
         policy_action = np.asarray(policy_action)
         
-        # 执行（Wrapper 决定实际动作）
-        next_obs, env_reward, terminated, truncated, info = self.env.step(policy_action)
+        # ========== VR → Policy 平滑过渡（HIL 通用保护机制）==========
+        # 在 env.step() 之前检查当前干预状态（通过环境的 operator_type）
+        current_is_intervention = getattr(self.env, 'operator_type', 'policy') != 'policy'
+        prev_is_intervention = self._was_intervention
         
-        # 从 info 读取干预信息
+        # VR → Policy 切换检测（在执行动作之前！）
+        if prev_is_intervention and not current_is_intervention:
+            # 刚从 VR 切换到 Policy：启动缓冲期
+            self._buffer_steps = self._buffer_duration
+            # 用上一步的 VR 动作，确保这一步也不跳变
+            print(f"[HIL-Actor] VR → Policy: buffer {self._buffer_duration} steps, then transition {self._transition_duration} steps")
+        
+        # 计算实际执行的动作
+        if self._buffer_steps > 0 and self._last_vr_action is not None:
+            # 缓冲期：继续执行上一个 VR 动作（策略在后台热身）
+            actual_step_action = self._last_vr_action.copy()
+            self._buffer_steps -= 1
+            if self._buffer_steps == 0:
+                self._transition_steps = self._transition_duration
+                print(f"[HIL-Actor] Buffer done, starting {self._transition_duration}-step transition")
+        elif self._transition_steps > 0 and self._last_vr_action is not None:
+            # 过渡期：线性混合 VR 动作和 policy 动作
+            alpha = self._transition_steps / self._transition_duration  # 1.0 → 0.0
+            actual_step_action = alpha * self._last_vr_action + (1 - alpha) * policy_action
+            self._transition_steps -= 1
+            if self._transition_steps == 0:
+                print(f"[HIL-Actor] Transition done, policy takes over")
+        else:
+            # 正常模式：直接执行 policy 动作
+            actual_step_action = policy_action
+        
+        # 执行（如果 VR 介入，环境会忽略这个动作）
+        next_obs, env_reward, terminated, truncated, info = self.env.step(actual_step_action)
+        
+        # 从 info 读取干预信息（用于数据记录）
         is_intervention = info.get("is_intervention", False)
-        actual_action = info.get("intervene_action", policy_action) if is_intervention else policy_action
+        
+        # 记录 VR 动作（从环境返回的机器人当前状态）
+        # 始终更新，确保切换时有最新的值
+        current_action = info.get("actual_action")
+        if current_action is not None:
+            if hasattr(current_action, 'cpu'):
+                self._last_vr_action = current_action.cpu().numpy().copy()
+            else:
+                self._last_vr_action = np.asarray(current_action).copy()
+        
+        # 更新干预状态（用于下一步检测）
+        # 使用 current_is_intervention（step 之前检测的），而不是 info 返回的
+        self._was_intervention = current_is_intervention
+        
+        # 实际记录的动作：
+        # - VR 介入时：环境返回的 actual_action（机器人当前状态）
+        # - 缓冲/过渡期：actual_step_action（可能是 VR 动作或混合动作）
+        # - 正常 policy：actual_step_action（policy 输出）
+        if is_intervention:
+            actual_action = info.get("actual_action", actual_step_action)
+        else:
+            actual_action = actual_step_action
         
         # 计算奖励（可由 classifier 覆盖）
         reward, classifier_success = self._compute_reward(env_reward, next_obs, info)
@@ -623,7 +689,7 @@ class HILLearnerLoop(BaseLoop):
     
     使用示例：
         learner = HILLearnerLoop(
-            trainable_adapter=adapter,
+            trainer=trainer,
             config=config,
             sync_config=sync_config,
         )
@@ -632,7 +698,7 @@ class HILLearnerLoop(BaseLoop):
     
     def __init__(
         self,
-        trainable_adapter: TrainableAdapterProtocol,
+        trainer: Trainer,  # 任何实现 Trainer 协议的对象
         config: HILLearnerConfig,
         sync_config: Optional[ActorLearnerConfig] = None,
         demo_buffer: Optional[BufferProtocol] = None,
@@ -644,7 +710,7 @@ class HILLearnerLoop(BaseLoop):
         # 手动管理 step_count，防止 BaseLoop.run() 重复递增
         self._manual_step_increment = True
         
-        self.adapter = trainable_adapter
+        self.trainer = trainer
         self.config = config
         
         # 创建或使用注入的通信服务器
@@ -732,7 +798,7 @@ class HILLearnerLoop(BaseLoop):
             if batch is None:
                 break
             batch = self._to_device(batch)
-            metrics = self.adapter.update(batch)
+            metrics = self.trainer.update(batch)
             metrics_list.append(metrics)
         
         # 合并 metrics
@@ -865,14 +931,14 @@ class HILLearnerLoop(BaseLoop):
     
     def _publish_weights(self) -> None:
         """发布权重"""
-        weights = self.adapter.get_weights()
+        weights = self.trainer.get_weights()
         self.server.publish_weights(weights, {"step": self._step_count})
     
     def _save_checkpoint(self) -> None:
         """保存 checkpoint"""
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
         path = f"{self.config.checkpoint_dir}/step_{self._step_count}.pt"
-        self.adapter.save(path)
+        self.trainer.save(path)
         print(f"[HIL-Learner] Checkpoint: {path}")
     
     def _get_online_size(self) -> int:

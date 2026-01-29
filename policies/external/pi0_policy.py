@@ -1,46 +1,62 @@
 """
-Pi0 / VLA 模型适配器示例
+Pi0 / VLA 模型策略示例
 
 展示如何将大型 VLA 模型（如 pi0.5、OpenVLA）接入 HIL 框架
 
 关键点：
 1. 只同步 LoRA/Adapter 参数（减少通信开销）
 2. 处理多模态输入（图像 + 语言）
-3. 适配模型特定的推理接口
+3. 实现 Policy Protocol 的推理接口
 """
 from typing import Dict, Any, Optional, List
 import torch
 import torch.nn as nn
 import numpy as np
 
-from core.interfaces.policy_adapter import (
-    PolicyAdapter,
-    TrainablePolicyAdapter,
-    WeightSyncMode,
-    filter_weights_by_keyword,
-)
+
+# ============ 权重同步模式 ============
+
+class WeightSyncMode:
+    """权重同步模式"""
+    FULL = "full"           # 全量同步
+    LORA = "lora"           # 只同步 LoRA 参数
+    ADAPTER = "adapter"     # 只同步 Adapter 参数
 
 
-class Pi0PolicyAdapter(PolicyAdapter):
+def filter_weights_by_keyword(
+    state_dict: Dict[str, torch.Tensor],
+    keywords: list,
+    include: bool = True
+) -> Dict[str, torch.Tensor]:
+    """按关键词过滤权重"""
+    result = {}
+    for key, value in state_dict.items():
+        matches = any(kw in key.lower() for kw in keywords)
+        if (include and matches) or (not include and not matches):
+            result[key] = value
+    return result
+
+
+class Pi0Policy:
     """
-    Pi0 策略适配器（Actor 端）
+    Pi0 策略（Actor 端）
     
-    特点：
-    - 支持 LoRA 参数同步
-    - 处理 VLA 多模态输入
-    - 适配 pi0 的推理接口
+    实现 Policy Protocol，支持：
+    - LoRA 参数同步
+    - VLA 多模态输入
+    - pi0 推理接口
     
     使用示例：
         from some_pi0_library import Pi0Model
         
         model = Pi0Model.from_pretrained("pi0-base")
-        adapter = Pi0PolicyAdapter(
+        policy = Pi0Policy(
             model=model,
             sync_mode="lora",
             language_instruction="pick up the red block",
         )
         
-        actor = HILActorLoop(adapter, env, client, config)
+        actor = HILActorLoop(policy, env, config)
     """
     
     def __init__(
@@ -182,9 +198,9 @@ class Pi0PolicyAdapter(PolicyAdapter):
         self.language_instruction = instruction
 
 
-class Pi0TrainerAdapter(TrainablePolicyAdapter):
+class Pi0Trainer:
     """
-    Pi0 训练适配器（Learner 端）
+    Pi0 训练器（Learner 端）
     
     特点：
     - 支持 LoRA 微调
@@ -192,13 +208,13 @@ class Pi0TrainerAdapter(TrainablePolicyAdapter):
     - 只更新/同步 LoRA 参数
     
     使用示例：
-        adapter = Pi0TrainerAdapter(
+        trainer = Pi0Trainer(
             model=pi0_model,
             sync_mode="lora",
             learning_rate=1e-4,
         )
         
-        learner = HILLearnerLoop(adapter, server, config)
+        learner = HILLearnerLoop(trainer, config)
     """
     
     def __init__(
@@ -242,9 +258,8 @@ class Pi0TrainerAdapter(TrainablePolicyAdapter):
                 param.requires_grad = False
     
     def act(self, obs: Dict[str, Any], deterministic: bool = False) -> np.ndarray:
-        """推理（与 PolicyAdapter 相同）"""
-        # 简化实现，实际应复用 Pi0PolicyAdapter 的逻辑
-        raise NotImplementedError("Use Pi0PolicyAdapter for inference")
+        """推理（使用 Pi0Policy）"""
+        raise NotImplementedError("Use Pi0Policy for inference")
     
     def get_weights(self) -> Dict[str, torch.Tensor]:
         """获取需要同步的权重"""
@@ -325,7 +340,7 @@ class Pi0TrainerAdapter(TrainablePolicyAdapter):
 
 # ============ 工厂函数 ============
 
-def create_pi0_adapters(
+def create_pi0_policy_and_trainer(
     model: nn.Module,
     sync_mode: str = "lora",
     language_instruction: str = "",
@@ -333,23 +348,29 @@ def create_pi0_adapters(
     device: str = "cuda",
 ):
     """
-    创建 Pi0 的 Actor 和 Learner 适配器
+    创建 Pi0 的 Policy 和 Trainer
     
     Returns:
-        (actor_adapter, learner_adapter)
+        (policy, trainer)
     """
-    actor_adapter = Pi0PolicyAdapter(
+    policy = Pi0Policy(
         model=model,
         sync_mode=sync_mode,
         language_instruction=language_instruction,
         device=device,
     )
     
-    learner_adapter = Pi0TrainerAdapter(
+    trainer = Pi0Trainer(
         model=model,
         sync_mode=sync_mode,
         learning_rate=learning_rate,
         device=device,
     )
     
-    return actor_adapter, learner_adapter
+    return policy, trainer
+
+
+# 兼容旧名称
+Pi0PolicyAdapter = Pi0Policy
+Pi0TrainerAdapter = Pi0Trainer
+create_pi0_adapters = create_pi0_policy_and_trainer

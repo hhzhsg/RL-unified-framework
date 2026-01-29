@@ -125,6 +125,9 @@ class H1ActEnv(BaseEnv):
         self.operator_type = "policy"
         self.done = False
         
+        # 警告标志（避免重复打印）
+        self._camera_warning_printed = False
+        
         # ========== ZCM 通信 ==========
         # ipcshm: 本地共享内存（同一机器）
         # udpm://239.255.76.67:7667: UDP 多播（跨机器，需要同一局域网）
@@ -306,7 +309,8 @@ class H1ActEnv(BaseEnv):
             image_dict = self.image_recorder.get_images()
             obs['images'] = self._images_to_tensor(image_dict).unsqueeze(0)
         else:
-            obs['images'] = torch.empty(0)
+            # 无相机模式：使用黑色占位图像
+            obs['images'] = self._get_placeholder_images().unsqueeze(0)
         
         return obs
     
@@ -322,7 +326,11 @@ class H1ActEnv(BaseEnv):
         注意: 如果某个相机缺失，会用黑图填充并打印警告
         """
         if not image_dict:
-            return torch.empty(0)
+            # 空字典：使用占位图像
+            if not self._camera_warning_printed:
+                print("[H1ActEnv] ⚠️ 相机返回空图像字典，使用黑色占位图像")
+                self._camera_warning_printed = True
+            return self._get_placeholder_images()
         
         images = []
         missing_warned = False
@@ -358,7 +366,11 @@ class H1ActEnv(BaseEnv):
                 images.append(img)
         
         if not images:
-            raise ValueError("No images found")
+            # 相机连接但无图像返回，使用占位图像
+            if not self._camera_warning_printed:
+                print("[H1ActEnv] ⚠️ 相机无图像，使用黑色占位图像")
+                self._camera_warning_printed = True
+            return self._get_placeholder_images()
         
         # Stack and move to GPU
         images_tensor = torch.from_numpy(np.stack(images, axis=0))  # (num_cam, C, H, W)
@@ -366,6 +378,25 @@ class H1ActEnv(BaseEnv):
             images_tensor = images_tensor.cuda()
         
         return images_tensor
+    
+    def _get_placeholder_images(self) -> torch.Tensor:
+        """
+        生成黑色占位图像（无相机时使用）
+        
+        Returns:
+            (num_cam, C, H, W) tensor，默认 4 个相机，480x640 分辨率
+        """
+        # 默认 4 个相机（2 个双目 × 2）
+        num_cameras = len(self.camera_names) * 2 if self.split_stereo else len(self.camera_names)
+        H, W, C = 480, 640, 3
+        
+        # 创建黑色图像 (num_cam, C, H, W)
+        placeholder = torch.zeros(num_cameras, C, H, W, dtype=torch.float32)
+        
+        if torch.cuda.is_available():
+            placeholder = placeholder.cuda()
+        
+        return placeholder
     
     def get_action(self) -> np.ndarray:
         """获取当前动作（从 ZCM 订阅的 target 构建）"""
@@ -395,6 +426,9 @@ class H1ActEnv(BaseEnv):
         - waist[3], head[2]
         """
         a = np.asarray(action, dtype=np.float64).flatten()
+        
+        # HIL 干预检测
+        is_intervention = (self.operator_type != "policy")
         
         # 解析 ACT 动作 (15 维)
         right_arm = a[:8]       # 8: 右臂关节 + gripper
@@ -432,8 +466,8 @@ class H1ActEnv(BaseEnv):
         # 获取观测
         obs = self.get_observation()
         
-        # HIL 干预检测
-        is_intervention = (self.operator_type != "policy")
+        # 始终记录当前机器人状态（用于 HIL Loop 的平滑过渡）
+        current_robot_state = self._get_current_state_as_action()
         
         reward = 0.0
         terminated = False
@@ -442,9 +476,33 @@ class H1ActEnv(BaseEnv):
             "is_intervention": is_intervention,
             "operator_type": self.operator_type,
             "policy_action": a,
+            "actual_action": current_robot_state,  # 始终返回机器人当前状态
         }
         # print(self.operator_type)
         return obs, reward, terminated, truncated, info
+    
+    def _get_current_state_as_action(self) -> np.ndarray:
+        """获取当前机器人状态作为动作（用于 VR 介入时记录）
+        
+        返回 ACT 格式动作 (15 维):
+        - [0:7]   right arm position
+        - [7:8]   right gripper position
+        - [8:11]  waist position (height, pitch, yaw)
+        - [11:13] head position (pitch, yaw)
+        - [13:15] base velocity (x, yaw)
+        """
+        right_arm = self.joint_state[7:14]  # 右臂 7 关节
+        right_gripper = self.gripper_state[1]  # 右 gripper
+        waist = self.waist_state  # 腰部 3 维
+        head = self.head_state  # 头部 2 维
+        base = self.chassis_state  # 底盘速度 2 维
+        
+        return np.concatenate([
+            right_arm, [right_gripper],  # 8
+            waist,  # 3
+            head,   # 2
+            base,   # 2
+        ])
     
     def get_buttons(self) -> Tuple[float, float, float, float]:
         """获取 VR 按钮状态"""

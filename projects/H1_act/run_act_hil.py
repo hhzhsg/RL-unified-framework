@@ -5,6 +5,8 @@ ACT++ HIL 推理脚本
 使用预训练 ACT++ 模型进行 rollout + HIL 干预
 支持 standalone 模式（本地收集数据）和分布式模式（连接 Learner）
 
+DETR 模型已集成到框架内，不再需要外部依赖。
+
 使用方式:
     # Standalone 模式（推荐先用这个测试）
     python run_act_hil.py --standalone
@@ -17,23 +19,13 @@ ACT++ HIL 推理脚本
 """
 import sys
 import os
-
-# === 必须在所有其他导入之前添加 ACT++ 路径 ===
-ACT_PLUS_PLUS_PATH = '/home/robot/pgp/act-plus-plus'
-ACT_DETR_PATH = '/home/robot/pgp/act-plus-plus/detr'  # detr 内部依赖 util 模块
-if ACT_PLUS_PLUS_PATH not in sys.path:
-    sys.path.insert(0, ACT_PLUS_PLUS_PATH)
-if ACT_DETR_PATH not in sys.path:
-    sys.path.insert(0, ACT_DETR_PATH)
-
 import argparse
 import time
 
 # 添加项目根目录到 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# ACTPolicy 需要在 sys.path 设置之后直接从模块导入
-from policies.adapters.act_adapter import ACTPolicy
+from policies.external.act_policy import ACTPolicy
 from env.h1_robot import H1ActEnv
 from core.runtime.hil_loop import HILActorLoop, HILActorConfig
 from core.synchronization.actor_learner import ActorLearnerConfig
@@ -57,6 +49,8 @@ def main():
                         help="启用相机（默认启用）")
     parser.add_argument("--no-camera", action="store_true",
                         help="禁用相机（调试用）")
+    parser.add_argument("--zcm-url", type=str, default=None,
+                        help="ZCM URL: ipcshm(本地) 或 udpm://239.255.76.67:7667?ttl=0(UDP多播)")
     
     # 模型配置
     parser.add_argument("--ckpt-dir", type=str, 
@@ -94,9 +88,17 @@ def main():
     env_config = {
         "use_camera": use_camera,
         "dry_run": args.dry_run,
-        "zcm_url": os.environ.get("H1_ZCM_URL", "ipcshm"),
+        # ZCM URL: 优先命令行参数 > 环境变量 > 默认 ipcshm
+        "zcm_url": args.zcm_url or os.environ.get("H1_ZCM_URL", "ipcshm"),
         "split_stereo": True,
+        # IDL 模块路径（ZCM 消息定义）
+        "idl_module": "idl_python",
+        "idl_python_paths": [
+            "/home/charles/Teleop_whole_body_sim/teleop/scripts",
+        ],
     }
+    
+    print(f"   ZCM URL: {env_config['zcm_url']}")
     
     if use_camera:
         env_config["camera_grpc_target"] = "localhost:50051"
@@ -131,7 +133,7 @@ def main():
             standalone_save_dir=args.save_dir,
         )
         actor = HILActorLoop(
-            policy_adapter=policy,
+            policy=policy,
             env=env,
             config=actor_config,
             sync_config=None,
@@ -153,7 +155,7 @@ def main():
             require_initial_weights=False,  # 使用预训练权重
         )
         actor = HILActorLoop(
-            policy_adapter=policy,
+            policy=policy,
             env=env,
             config=actor_config,
             sync_config=sync_config,

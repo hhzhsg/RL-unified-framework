@@ -374,6 +374,21 @@ class H1RobotEnv(BaseEnv):
             self.chassis_control,
         ])
     
+    def _get_current_action(self) -> np.ndarray:
+        """
+        从当前关节状态构建动作（用于保持姿态）
+        
+        Returns:
+            action (23,): arm(14) + gripper(2) + waist(3) + head(2) + base(2)
+        """
+        return np.concatenate([
+            self.joint_state,        # 14: 左右臂关节
+            self.gripper_state,      # 2: 左右夹爪
+            self.waist_state,        # 3: 腰部
+            self.head_state,         # 2: 头部
+            np.zeros(2),             # 2: 底盘速度（保持静止）
+        ])
+    
     def step(self, action: Any) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
         """
         执行动作
@@ -389,11 +404,26 @@ class H1RobotEnv(BaseEnv):
         - left_joint_action[8] = arm[0:7] + gripper[0]
         - right_joint_action[8] = arm[7:14] + gripper[1]
         - waist[3], head[2]
+        
+        安全机制：如果动作全为 0，则保持当前关节状态（避免意外动作）
         """
         a = np.asarray(action, dtype=np.float64).flatten()
         
         if len(a) < 23:
             a = np.pad(a, (0, 23 - len(a)), mode='constant', constant_values=0)
+        
+        # 安全机制：如果动作全为 0，用当前关节状态替代（保持姿态）
+        if np.allclose(a, 0):
+            current_state = self._get_current_action()
+            if not np.allclose(current_state, 0):
+                a = current_state
+                if not hasattr(self, '_zero_action_warned'):
+                    print("[H1] ⚠️ 收到全零动作，使用当前关节状态保持姿态")
+                    self._zero_action_warned = True
+            else:
+                if not hasattr(self, '_no_state_warned'):
+                    print("[H1] ⚠️ 收到全零动作，且当前关节状态也是零（等待 ZCM 数据）")
+                    self._no_state_warned = True
         
         # 解析动作 (23 维规范格式)
         arm_pos = a[0:14]       # 14: 左右臂关节

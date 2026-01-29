@@ -11,7 +11,7 @@ env:
   # IDL 配置
   idl_module: idl_python
   idl_python_paths:
-    # - /home/charles/Teleop_whole_body_sim/teleop/scripts
+    - /home/charles/Teleop_whole_body_sim/teleop/scripts
     - /home/robot/Teleop_whole_body_sim/teleop/scripts
   # 相机（需要相机服务运行）
   use_camera: true

@@ -10,7 +10,7 @@
 - HIL 干预检测（VR 按键接管）
 - transition 数据流（rollout vs intervention）
 
-因为没有好的 base policy，临时用 **QposEchoAdapter**（qpos → action），机器人保持静止。
+因为没有好的 base policy，临时用 **StateEchoPolicy**（qpos → action），机器人保持静止。
 
 ## 使用方式
 

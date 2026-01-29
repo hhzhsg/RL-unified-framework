@@ -1,13 +1,14 @@
 """
-ACT++ 策略适配器
+ACT++ 策略
 
 参考 inference2.py 实现，用于 HIL 框架
 
-注意：使用本模块前，必须确保 ACT++ 路径已添加到 sys.path
-例如在入口脚本开头添加：
-    sys.path.insert(0, '/home/robot/pgp/act-plus-plus')
+需要外部 ACT++ 仓库：
+  export ACT_PLUS_PLUS_PATH=/path/to/act-plus-plus
+  或在 run_act_hil.py 中设置路径
 """
 import os
+import sys
 import pickle
 from types import SimpleNamespace
 from typing import Dict, Any
@@ -16,18 +17,27 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 
-from core.interfaces.policy_adapter import PolicyAdapter
+# 从环境变量或默认路径导入 ACT++ detr 模块
+ACT_PATH = os.environ.get("ACT_PLUS_PLUS_PATH") or os.environ.get("ACT_PLUS_PLUS", "/home/charles/rl_code/act-plus-plus")
+DETR_PATH = os.path.join(ACT_PATH, "detr")
+
+if ACT_PATH not in sys.path:
+    sys.path.insert(0, ACT_PATH)
+if DETR_PATH not in sys.path:
+    sys.path.insert(0, DETR_PATH)
+
+from detr.models import build_ACT_model
 
 
-class ACTPolicy(PolicyAdapter):
+class ACTPolicy:
     """
     ACT++ 策略
     
     加载预训练 checkpoint，执行推理
-    支持 HIL 框架的权重同步接口
+    支持 HIL 框架的权重同步接口（实现 Policy Protocol）
     
     ACT 模型输出 action chunk (num_queries 步动作)，
-    本适配器支持两种模式：
+    本策略支持两种模式：
     1. 每步查询：每个 timestep 都调用模型，取第一个动作
     2. Chunk 查询：每 query_frequency 步查询一次，缓存 chunk 后逐步执行
     """
@@ -108,8 +118,6 @@ class ACTPolicy(PolicyAdapter):
     
     def _build_model(self) -> torch.nn.Module:
         """构建 ACT 模型"""
-        from detr.models import build_ACT_model
-        
         # 构造 args（与训练时一致）
         args = SimpleNamespace(
             # optimizer / training
@@ -155,6 +163,7 @@ class ACTPolicy(PolicyAdapter):
             # ACT / policy
             load_pretrain=False,
             action_dim=self.action_dim,
+            state_dim=self.state_dim,
             no_encoder=False,
 
             # logging / ckpt
@@ -187,13 +196,51 @@ class ACTPolicy(PolicyAdapter):
         ckpt = torch.load(ckpt_path, map_location=self._device)
         
         # 处理 state_dict 格式差异
-        # checkpoint 可能有 'model.' 前缀（来自训练时的包装），需要去掉
         state_dict = ckpt
+        
+        # 1. 去掉 'model.' 前缀（来自训练时的包装）
         if any(k.startswith('model.') for k in state_dict.keys()):
             print("[ACTPolicy] Removing 'model.' prefix from checkpoint keys...")
             state_dict = {k.replace('model.', '', 1): v for k, v in state_dict.items()}
         
-        self.model.load_state_dict(state_dict)
+        # 2. 处理 encoder 结构差异（旧版 vs 新版 ACT++）
+        # 旧版: encoder.layers.0... → 新版: encoder.encoder.layers.0...
+        # 检测是否需要映射
+        model_keys = set(self.model.state_dict().keys())
+        ckpt_keys = set(state_dict.keys())
+        
+        # 检测 encoder 结构差异
+        needs_encoder_remap = (
+            any('encoder.encoder.layers' in k for k in model_keys) and
+            any(k.startswith('encoder.layers') for k in ckpt_keys)
+        )
+        
+        if needs_encoder_remap:
+            print("[ACTPolicy] Remapping encoder keys (old format → new format)...")
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith('encoder.layers'):
+                    # encoder.layers.X... → encoder.encoder.layers.X...
+                    new_k = k.replace('encoder.layers', 'encoder.encoder.layers', 1)
+                elif k.startswith('decoder.'):
+                    # decoder.X... → encoder.decoder.X...
+                    new_k = 'encoder.' + k
+                else:
+                    new_k = k
+                new_state_dict[new_k] = v
+            state_dict = new_state_dict
+        
+        # 3. 尝试加载（允许不严格匹配）
+        try:
+            self.model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as e:
+            print(f"[ACTPolicy] Strict loading failed, trying non-strict...")
+            missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"  Missing keys ({len(missing)}): {missing[:5]}...")
+            if unexpected:
+                print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}...")
+        
         print(f"[ACTPolicy] Loaded checkpoint from {ckpt_path}")
     
     def _preprocess_qpos(self, qpos: np.ndarray) -> torch.Tensor:

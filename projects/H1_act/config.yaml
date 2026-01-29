@@ -19,6 +19,12 @@ env:
   type: h1_robot
   use_camera: true
   dry_run: false
+  # ZCM 通信
+  zcm_url: ipcshm              # 本地: ipcshm, 跨机器: udpm://239.255.76.67:7667
+  # IDL 配置
+  idl_module: idl_python
+  idl_python_paths:
+    - /home/charles/Teleop_whole_body_sim/teleop/scripts
   camera_grpc_target: "localhost:50051"
   camera_names:
     - v4l2/cam_high
